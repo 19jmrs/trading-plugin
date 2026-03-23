@@ -1,0 +1,18 @@
+.trading-journal-dashboard {
+  background: #0d0d0d;
+  color: #e0e0e0;
+}
+
+.trading-journal-dashboard select,
+.trading-journal-dashboard button {
+  cursor: pointer;
+}
+
+.trading-journal-dashboard select:hover,
+.trading-journal-dashboard button:hover {
+  border-color: #444 !important;
+}
+
+.trading-journal-dashboard table tr:hover td {
+  background: rgba(255,255,255,0.02);
+}

@@ -1,0 +1,10 @@
+{
+  "id": "trading-journal",
+  "name": "Trading Journal",
+  "version": "1.0.0",
+  "minAppVersion": "1.0.0",
+  "description": "Trading journal dashboard with P&L analytics, equity curve, and market conditions correlation.",
+  "author": "You",
+  "authorUrl": "",
+  "isDesktopOnly": true
+}
