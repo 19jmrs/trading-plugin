@@ -25,6 +25,14 @@ function calcPnL(dir: "long"|"short", ep: number, xp: number, size: number, ef: 
   return (dir === "long" ? (xp-ep)*size : (ep-xp)*size) - ef - xf;
 }
 
+function compareTradeRowDateTime(a: TradeRow, b: TradeRow): number {
+  const [ay, am, ad] = a.date.split("-").map(Number);
+  const [by, bm, bd] = b.date.split("-").map(Number);
+  const [ah = 0, amin = 0] = a.time.split(":").map(Number);
+  const [bh = 0, bmin = 0] = b.time.split(":").map(Number);
+  return new Date(ay, am - 1, ad, ah, amin).getTime() - new Date(by, bm - 1, bd, bh, bmin).getTime();
+}
+
 export interface MatchResult {
   trades:   Trade[];
   openRows: TradeRow[];
@@ -45,9 +53,8 @@ export function matchTrades(rows: TradeRow[], marketScores: Record<string, numbe
     const exits   = tradeRows.filter(r => r.type === "exit");
     if (!entries.length) continue;
 
-    const sort = (a: TradeRow, b: TradeRow) => `${a.date}${a.time}`.localeCompare(`${b.date}${b.time}`);
-    entries.sort(sort);
-    exits.sort(sort);
+    entries.sort(compareTradeRowDateTime);
+    exits.sort(compareTradeRowDateTime);
 
     const entry = entries[0];
 

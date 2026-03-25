@@ -124,25 +124,55 @@ class SidebarView extends ItemView {
       row.createEl("span", { text:item.value, attr:{ style:`color:${item.color};font-size:12px;font-weight:700;` } });
     });
 
-    // Streak
+    // Streak — last5 is { trade: Trade; is_winner: boolean }[]
     if (streak.last5.length) {
       wrap.createEl("div", { text:"Last 5 Trades", attr:{ style:"color:var(--text-muted);font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;margin-top:12px;margin-bottom:6px;" } });
-      const streakRow = wrap.createEl("div", { attr:{ style:"display:flex;gap:6px;align-items:center;" } });
-      streak.last5.forEach(w => {
-        streakRow.createEl("div", { attr:{ style:`width:20px;height:20px;border-radius:50%;background:${w?"#4ade80":"#f87171"};display:inline-flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:#000;` }, text: w?"W":"L" });
+      const streakRow = wrap.createEl("div", { attr:{ style:"display:flex;gap:6px;align-items:center;flex-wrap:wrap;" } });
+      streak.last5.forEach(({ trade: t, is_winner: w }) => {
+        const dot = streakRow.createEl("div", {
+          attr:{ style:`width:22px;height:22px;border-radius:50%;background:${w?"#4ade80":"#f87171"};display:inline-flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:#000;cursor:pointer;flex-shrink:0;` },
+          text: w ? "W" : "L"
+        });
+        // Simple title tooltip showing trade details
+        dot.setAttribute("title", `${t.exit_date} ${t.exit_time} · ${t.symbol} ${t.dir.toUpperCase()} · ${t.pnl >= 0 ? "+" : ""}$${t.pnl.toFixed(2)} · ${t.r_multiple}R`);
       });
       const mLabel = streak.momentum==="hot"?"🔥 Hot":streak.momentum==="cold"?"❄️ Cold":"〰️ Mixed";
       streakRow.createEl("span", { text:mLabel, attr:{ style:`color:${streak.momentum==="hot"?"#facc15":streak.momentum==="cold"?"#60a5fa":"var(--text-muted)"};font-size:11px;margin-left:4px;font-weight:700;` } });
     }
 
-    // Open positions
+    // Open positions — openRows contain remaining size after partial exits
     const open = this.cache.getOpenRows();
     if (open.length) {
       wrap.createEl("div", { text:`Open Positions (${open.length})`, attr:{ style:"color:#facc15;font-size:11px;font-weight:700;margin-top:12px;margin-bottom:6px;" } });
       open.forEach(r => {
-        const row = wrap.createEl("div", { attr:{ style:"display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid var(--background-modifier-border);" } });
-        row.createEl("span", { text:`${r.symbol} ${r.dir??""}`, attr:{ style:"color:var(--text-normal);font-size:11px;" } });
-        row.createEl("span", { text:`@${r.price}`, attr:{ style:"color:var(--text-muted);font-size:11px;" } });
+        // Find original entry size from closed trades (same base trade_id)
+        const baseId      = r.trade_id;
+        const relatedExit = trades.find(t => t.trade_id.replace(/#[0-9]+$/, "") === baseId);
+        const initialSize = relatedExit ? relatedExit.entry_size : r.size;
+        const currentSize = parseFloat(r.size.toFixed(4));
+        const pct         = initialSize > 0 ? ((currentSize / initialSize) * 100).toFixed(0) : "—";
+
+        const posWrap = wrap.createEl("div", { attr:{ style:"padding:6px 0;border-bottom:1px solid var(--background-modifier-border);" } });
+
+        // Row 1: Symbol + direction + entry price
+        const row1 = posWrap.createEl("div", { attr:{ style:"display:flex;justify-content:space-between;align-items:center;margin-bottom:3px;" } });
+        row1.createEl("span", { text:`${r.symbol} ${(r.dir??"").toUpperCase()}`, attr:{ style:"color:var(--text-normal);font-size:12px;font-weight:700;" } });
+        row1.createEl("span", { text:`@$${r.price}`, attr:{ style:"color:var(--text-muted);font-size:11px;" } });
+
+        // Row 2: Shares info
+        const row2 = posWrap.createEl("div", { attr:{ style:"display:flex;justify-content:space-between;align-items:center;margin-bottom:2px;" } });
+        row2.createEl("span", { text:`${currentSize} / ${initialSize} shares`, attr:{ style:"color:var(--text-muted);font-size:10px;" } });
+        row2.createEl("span", {
+          text:`${pct}% open`,
+          attr:{ style:`color:${Number(pct) > 50 ? "#facc15" : "#fb923c"};font-size:10px;font-weight:700;` }
+        });
+
+        // Row 3: Target SL
+        if (r.target_sl) {
+          const row3 = posWrap.createEl("div", { attr:{ style:"display:flex;justify-content:space-between;" } });
+          row3.createEl("span", { text:"Target SL", attr:{ style:"color:var(--text-faint);font-size:10px;" } });
+          row3.createEl("span", { text:`$${r.target_sl}`, attr:{ style:"color:#f87171;font-size:10px;font-weight:700;" } });
+        }
       });
     }
 

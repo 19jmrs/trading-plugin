@@ -117,10 +117,63 @@ function tradeCountEl(
   el.addEventListener("click", () => onShowTrades(trades));
 }
 
+// ─── Expand modal ────────────────────────────────────────────────────────────
+function showExpandModal(title: string, renderFn: (container: HTMLElement) => void): void {
+  // Overlay
+  const overlay = document.body.createEl("div", { attr: { style: `
+    position:fixed;inset:0;background:rgba(0,0,0,0.75);z-index:99990;
+    display:flex;align-items:center;justify-content:center;
+    backdrop-filter:blur(4px);
+  `}});
+
+  // Modal box
+  const modal = overlay.createEl("div", { attr: { style: `
+    background:var(--background-secondary);
+    border:1px solid var(--background-modifier-border);
+    border-radius:14px;padding:24px;
+    width:90vw;max-width:1100px;
+    max-height:85vh;overflow-y:auto;
+    position:relative;
+  `}});
+
+  // Header
+  const hdr = modal.createEl("div", { attr: { style: "display:flex;justify-content:space-between;align-items:center;margin-bottom:18px;" }});
+  hdr.createEl("div", { text: title, attr: { style: `color:var(--text-normal);font-size:16px;font-weight:700;font-family:${F};` }});
+  const closeBtn = hdr.createEl("button", { text: "✕", attr: { style: `
+    background:transparent;border:1px solid var(--background-modifier-border);
+    color:var(--text-muted);border-radius:6px;padding:4px 10px;
+    cursor:pointer;font-size:14px;font-family:${F};
+  `}});
+
+  // Chart container — larger size
+  const chartWrap = modal.createEl("div", { attr: { style: "width:100%;" }});
+  renderFn(chartWrap);
+
+  // Close handlers
+  const close = () => overlay.remove();
+  closeBtn.addEventListener("click", close);
+  overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
+  document.addEventListener("keydown", function onKey(e) {
+    if (e.key === "Escape") { close(); document.removeEventListener("keydown", onKey); }
+  });
+}
+
+// Add expand button to a card
+function addExpandBtn(parent: HTMLElement, title: string, renderFn: (container: HTMLElement) => void): void {
+  const btn = parent.createEl("button", { text: "⤢", attr: { style: `
+    background:transparent;border:1px solid var(--background-modifier-border);
+    color:var(--text-muted);border-radius:4px;padding:1px 6px;
+    cursor:pointer;font-size:11px;float:right;margin-top:-2px;
+    font-family:${F};
+  `}});
+  btn.setAttribute("title", "Expand chart");
+  btn.addEventListener("click", () => showExpandModal(title, renderFn));
+}
+
 // ─── Equity Curve with hover crosshair ───────────────────────────────────────
-function renderEquity(parent: HTMLElement, data: {date:string;value:number}[]): void {
+function renderEquity(parent: HTMLElement, data: {date:string;value:number}[], chartW=500): void {
   if (data.length < 2) { parent.createEl("div",{text:"No data",attr:{style:`color:${C.muted};font-size:11px;`}}); return; }
-  const W=500,H=140,P={t:10,r:10,b:20,l:70};
+  const W=chartW,H=Math.round(chartW*0.28),P={t:10,r:10,b:20,l:70};
   const W2=W-P.l-P.r, H2=H-P.t-P.b;
   const vals=data.map(d=>d.value), minV=Math.min(...vals), maxV=Math.max(...vals), range=maxV-minV||1;
   const sx=(i:number)=>P.l+(i/(data.length-1))*W2;
@@ -176,9 +229,9 @@ function renderEquity(parent: HTMLElement, data: {date:string;value:number}[]): 
 }
 
 // ─── Drawdown with hover ─────────────────────────────────────────────────────
-function renderDrawdown(parent: HTMLElement, data: {date:string;value:number}[]): void {
+function renderDrawdown(parent: HTMLElement, data: {date:string;value:number}[], chartW=500): void {
   if (data.length < 2) return;
-  const W=500,H=90,P={t:5,r:10,b:20,l:50};
+  const W=chartW,H=Math.round(chartW*0.18),P={t:5,r:10,b:20,l:50};
   const W2=W-P.l-P.r, H2=H-P.t-P.b;
   const minV=Math.min(...data.map(d=>d.value));
   const sy=(v:number)=>P.t+((v/(minV||-1))*H2);
@@ -606,14 +659,14 @@ function renderGrades(parent: HTMLElement, stats: TradeStats, trades: Trade[], o
 }
 
 // ─── Market correlation ───────────────────────────────────────────────────────
-function renderCorrelation(parent: HTMLElement, data: {score:number;pnl:number;date:string;symbol:string}[]): void {
+function renderCorrelation(parent: HTMLElement, data: {score:number;pnl:number;date:string;symbol:string}[], chartW=500): void {
   if(data.length<3){
     const msg=div(parent,"");
     msg.createEl("div",{text:`${data.length} trades have market score data (need at least 3).`,attr:{style:`color:${C.muted};font-size:11px;margin-bottom:6px;`}});
     msg.createEl("div",{text:"To populate this chart: open each daily note in Live Preview so the Dataview block writes the 'score' frontmatter value, then rebuild the cache.",attr:{style:`color:${C.faint};font-size:10px;`}});
     return;
   }
-  const W=500,H=140,P={t:10,r:10,b:28,l:70};
+  const W=chartW,H=Math.round(chartW*0.28),P={t:10,r:10,b:28,l:70};
   const W2=W-P.l-P.r, H2=H-P.t-P.b;
   const pnls=data.map(d=>d.pnl);
   const minP=Math.min(...pnls), maxP=Math.max(...pnls), rangeP=maxP-minP||1;
@@ -883,8 +936,14 @@ export function renderDashboard(
 
     // Row 1: Equity + Drawdown
     const g1=div(container,"display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:12px 16px 0;");
-    const eq=card(g1); cardTitle(eq,"Equity Curve"); renderEquity(eq,stats.equity_curve);
-    const dd=card(g1); cardTitle(dd,"Drawdown");     renderDrawdown(dd,stats.drawdown_curve);
+    const eq=card(g1);
+    addExpandBtn(eq,"Equity Curve",(c)=>renderEquity(c,stats.equity_curve,900));
+    cardTitle(eq,"Equity Curve");
+    renderEquity(eq,stats.equity_curve);
+    const dd=card(g1);
+    addExpandBtn(dd,"Drawdown",(c)=>renderDrawdown(c,stats.drawdown_curve,900));
+    cardTitle(dd,"Drawdown");
+    renderDrawdown(dd,stats.drawdown_curve);
 
     // Row 2: Monthly bars + Streak
     const g2=div(container,"display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:12px 16px 0;");
@@ -918,6 +977,7 @@ export function renderDashboard(
 
     // Market correlation
     const mc=card(container,"margin:12px 16px 16px;");
+    addExpandBtn(mc,"Market Conditions vs P&L",(c)=>renderCorrelation(c,stats.market_correlation,900));
     cardTitle(mc,"Market Conditions vs P&L");
     renderCorrelation(mc,stats.market_correlation);
   };

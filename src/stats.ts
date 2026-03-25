@@ -77,11 +77,17 @@ function monthKey(dateStr: string): string {
   return dateStr.slice(0, 7); // YYYY-MM
 }
 
+function toDateTimeMs(dateStr: string, timeStr: string): number {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  const [h = 0, min = 0] = timeStr.split(":").map(Number);
+  return new Date(y, m - 1, d, h, min).getTime();
+}
+
 // ─── Streak ───────────────────────────────────────────────────────────────────
 function buildStreak(trades: Trade[]): StreakInfo {
   if (!trades.length) return { last5: [], current_streak: 0, longest_win: 0, longest_loss: 0, momentum: "none" };
 
-  const sorted = [...trades].sort((a,b) => `${a.exit_date}${a.exit_time}`.localeCompare(`${b.exit_date}${b.exit_time}`));
+  const sorted = [...trades].sort((a, b) => toDateTimeMs(a.exit_date, a.exit_time) - toDateTimeMs(b.exit_date, b.exit_time));
   const last5  = sorted.slice(-5).reverse().map(t => ({ trade: t, is_winner: t.is_winner }));
 
   let cur = 0, longestW = 0, longestL = 0, streak = 0;
@@ -113,8 +119,9 @@ function buildEquity(trades: Trade[], events: AccountEvent[], account?: string):
   let bal  = ev.filter(e => e.type === "initial").reduce((s,e) => s+e.amount, 0) || 10000;
   const cf: Record<string, number> = {};
   ev.forEach(e => { if (e.type==="deposit") cf[e.date]=(cf[e.date]??0)+e.amount; if (e.type==="withdrawal") cf[e.date]=(cf[e.date]??0)-e.amount; });
-  const curve = [{ date: trades[0]?.entry_date ?? "", value: bal }];
-  for (const t of trades) {
+  const sorted = [...trades].sort((a, b) => toDateTimeMs(a.exit_date, a.exit_time) - toDateTimeMs(b.exit_date, b.exit_time));
+  const curve = [{ date: sorted[0]?.entry_date ?? "", value: bal }];
+  for (const t of sorted) {
     if (cf[t.exit_date]) { bal += cf[t.exit_date]; delete cf[t.exit_date]; }
     bal += t.pnl;
     curve.push({ date: t.exit_date, value: parseFloat(bal.toFixed(2)) });

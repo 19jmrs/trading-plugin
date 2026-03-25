@@ -281,6 +281,13 @@ function calcHoldDays(ed, xd) {
 function calcPnL(dir, ep, xp, size, ef, xf) {
   return (dir === "long" ? (xp - ep) * size : (ep - xp) * size) - ef - xf;
 }
+function compareTradeRowDateTime(a, b) {
+  const [ay, am, ad] = a.date.split("-").map(Number);
+  const [by, bm, bd] = b.date.split("-").map(Number);
+  const [ah = 0, amin = 0] = a.time.split(":").map(Number);
+  const [bh = 0, bmin = 0] = b.time.split(":").map(Number);
+  return new Date(ay, am - 1, ad, ah, amin).getTime() - new Date(by, bm - 1, bd, bh, bmin).getTime();
+}
 function matchTrades(rows, marketScores) {
   var _a, _b, _c, _d;
   const byId = {};
@@ -296,9 +303,8 @@ function matchTrades(rows, marketScores) {
     const exits = tradeRows.filter((r) => r.type === "exit");
     if (!entries.length)
       continue;
-    const sort = (a, b) => `${a.date}${a.time}`.localeCompare(`${b.date}${b.time}`);
-    entries.sort(sort);
-    exits.sort(sort);
+    entries.sort(compareTradeRowDateTime);
+    exits.sort(compareTradeRowDateTime);
     const entry = entries[0];
     if (!exits.length) {
       openRows.push(entry);
@@ -557,10 +563,15 @@ function weekKey(dateStr) {
 function monthKey(dateStr) {
   return dateStr.slice(0, 7);
 }
+function toDateTimeMs(dateStr, timeStr) {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  const [h = 0, min = 0] = timeStr.split(":").map(Number);
+  return new Date(y, m - 1, d, h, min).getTime();
+}
 function buildStreak(trades) {
   if (!trades.length)
     return { last5: [], current_streak: 0, longest_win: 0, longest_loss: 0, momentum: "none" };
-  const sorted = [...trades].sort((a, b) => `${a.exit_date}${a.exit_time}`.localeCompare(`${b.exit_date}${b.exit_time}`));
+  const sorted = [...trades].sort((a, b) => toDateTimeMs(a.exit_date, a.exit_time) - toDateTimeMs(b.exit_date, b.exit_time));
   const last5 = sorted.slice(-5).reverse().map((t) => ({ trade: t, is_winner: t.is_winner }));
   let cur = 0, longestW = 0, longestL = 0, streak = 0;
   for (const t of sorted) {
@@ -589,8 +600,9 @@ function buildEquity(trades, events, account) {
     if (e.type === "withdrawal")
       cf[e.date] = ((_b2 = cf[e.date]) != null ? _b2 : 0) - e.amount;
   });
-  const curve = [{ date: (_b = (_a = trades[0]) == null ? void 0 : _a.entry_date) != null ? _b : "", value: bal }];
-  for (const t of trades) {
+  const sorted = [...trades].sort((a, b) => toDateTimeMs(a.exit_date, a.exit_time) - toDateTimeMs(b.exit_date, b.exit_time));
+  const curve = [{ date: (_b = (_a = sorted[0]) == null ? void 0 : _a.entry_date) != null ? _b : "", value: bal }];
+  for (const t of sorted) {
     if (cf[t.exit_date]) {
       bal += cf[t.exit_date];
       delete cf[t.exit_date];
@@ -962,12 +974,58 @@ function moveTooltip(tt, e) {
 function hideTooltip(tt) {
   tt.style.display = "none";
 }
-function renderEquity(parent, data) {
+function showExpandModal(title, renderFn) {
+  const overlay = document.body.createEl("div", { attr: { style: `
+    position:fixed;inset:0;background:rgba(0,0,0,0.75);z-index:99990;
+    display:flex;align-items:center;justify-content:center;
+    backdrop-filter:blur(4px);
+  ` } });
+  const modal = overlay.createEl("div", { attr: { style: `
+    background:var(--background-secondary);
+    border:1px solid var(--background-modifier-border);
+    border-radius:14px;padding:24px;
+    width:90vw;max-width:1100px;
+    max-height:85vh;overflow-y:auto;
+    position:relative;
+  ` } });
+  const hdr = modal.createEl("div", { attr: { style: "display:flex;justify-content:space-between;align-items:center;margin-bottom:18px;" } });
+  hdr.createEl("div", { text: title, attr: { style: `color:var(--text-normal);font-size:16px;font-weight:700;font-family:${F};` } });
+  const closeBtn = hdr.createEl("button", { text: "\u2715", attr: { style: `
+    background:transparent;border:1px solid var(--background-modifier-border);
+    color:var(--text-muted);border-radius:6px;padding:4px 10px;
+    cursor:pointer;font-size:14px;font-family:${F};
+  ` } });
+  const chartWrap = modal.createEl("div", { attr: { style: "width:100%;" } });
+  renderFn(chartWrap);
+  const close = () => overlay.remove();
+  closeBtn.addEventListener("click", close);
+  overlay.addEventListener("click", (e) => {
+    if (e.target === overlay)
+      close();
+  });
+  document.addEventListener("keydown", function onKey(e) {
+    if (e.key === "Escape") {
+      close();
+      document.removeEventListener("keydown", onKey);
+    }
+  });
+}
+function addExpandBtn(parent, title, renderFn) {
+  const btn = parent.createEl("button", { text: "\u2922", attr: { style: `
+    background:transparent;border:1px solid var(--background-modifier-border);
+    color:var(--text-muted);border-radius:4px;padding:1px 6px;
+    cursor:pointer;font-size:11px;float:right;margin-top:-2px;
+    font-family:${F};
+  ` } });
+  btn.setAttribute("title", "Expand chart");
+  btn.addEventListener("click", () => showExpandModal(title, renderFn));
+}
+function renderEquity(parent, data, chartW = 500) {
   if (data.length < 2) {
     parent.createEl("div", { text: "No data", attr: { style: `color:${C.muted};font-size:11px;` } });
     return;
   }
-  const W = 500, H = 140, P = { t: 10, r: 10, b: 20, l: 70 };
+  const W = chartW, H = Math.round(chartW * 0.28), P = { t: 10, r: 10, b: 20, l: 70 };
   const W2 = W - P.l - P.r, H2 = H - P.t - P.b;
   const vals = data.map((d) => d.value), minV = Math.min(...vals), maxV = Math.max(...vals), range = maxV - minV || 1;
   const sx = (i) => P.l + i / (data.length - 1) * W2;
@@ -1044,10 +1102,10 @@ function renderEquity(parent, data) {
     hideTooltip(tt);
   });
 }
-function renderDrawdown(parent, data) {
+function renderDrawdown(parent, data, chartW = 500) {
   if (data.length < 2)
     return;
-  const W = 500, H = 90, P = { t: 5, r: 10, b: 20, l: 50 };
+  const W = chartW, H = Math.round(chartW * 0.18), P = { t: 5, r: 10, b: 20, l: 50 };
   const W2 = W - P.l - P.r, H2 = H - P.t - P.b;
   const minV = Math.min(...data.map((d) => d.value));
   const sy = (v) => P.t + v / (minV || -1) * H2;
@@ -1470,14 +1528,14 @@ function renderGrades(parent, stats, trades, onShowTrades) {
     c.createEl("div", { text: `WR: ${g.win_rate}% \xB7 Avg R: ${g.avg_r}`, attr: { style: `color:${C.muted};font-size:10px;margin-top:2px;font-family:${F};` } });
   });
 }
-function renderCorrelation(parent, data) {
+function renderCorrelation(parent, data, chartW = 500) {
   if (data.length < 3) {
     const msg = div(parent, "");
     msg.createEl("div", { text: `${data.length} trades have market score data (need at least 3).`, attr: { style: `color:${C.muted};font-size:11px;margin-bottom:6px;` } });
     msg.createEl("div", { text: "To populate this chart: open each daily note in Live Preview so the Dataview block writes the 'score' frontmatter value, then rebuild the cache.", attr: { style: `color:${C.faint};font-size:10px;` } });
     return;
   }
-  const W = 500, H = 140, P = { t: 10, r: 10, b: 28, l: 70 };
+  const W = chartW, H = Math.round(chartW * 0.28), P = { t: 10, r: 10, b: 28, l: 70 };
   const W2 = W - P.l - P.r, H2 = H - P.t - P.b;
   const pnls = data.map((d) => d.pnl);
   const minP = Math.min(...pnls), maxP = Math.max(...pnls), rangeP = maxP - minP || 1;
@@ -1764,9 +1822,11 @@ function renderDashboard(container, stats, trades, events, filters, onFilterChan
     renderStatsBar(container, stats, trades, onShowTrades, openFile);
     const g1 = div(container, "display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:12px 16px 0;");
     const eq = card(g1);
+    addExpandBtn(eq, "Equity Curve", (c) => renderEquity(c, stats.equity_curve, 900));
     cardTitle(eq, "Equity Curve");
     renderEquity(eq, stats.equity_curve);
     const dd = card(g1);
+    addExpandBtn(dd, "Drawdown", (c) => renderDrawdown(c, stats.drawdown_curve, 900));
     cardTitle(dd, "Drawdown");
     renderDrawdown(dd, stats.drawdown_curve);
     const g2 = div(container, "display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:12px 16px 0;");
@@ -1796,6 +1856,7 @@ function renderDashboard(container, stats, trades, events, filters, onFilterChan
     cardTitle(gr, "Grade Breakdown");
     renderGrades(gr, stats, trades, onShowTrades);
     const mc = card(container, "margin:12px 16px 16px;");
+    addExpandBtn(mc, "Market Conditions vs P&L", (c) => renderCorrelation(c, stats.market_correlation, 900));
     cardTitle(mc, "Market Conditions vs P&L");
     renderCorrelation(mc, stats.market_correlation);
   };
@@ -1933,9 +1994,13 @@ var SidebarView = class extends import_obsidian3.ItemView {
     });
     if (streak.last5.length) {
       wrap.createEl("div", { text: "Last 5 Trades", attr: { style: "color:var(--text-muted);font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;margin-top:12px;margin-bottom:6px;" } });
-      const streakRow = wrap.createEl("div", { attr: { style: "display:flex;gap:6px;align-items:center;" } });
-      streak.last5.forEach((w) => {
-        streakRow.createEl("div", { attr: { style: `width:20px;height:20px;border-radius:50%;background:${w ? "#4ade80" : "#f87171"};display:inline-flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:#000;` }, text: w ? "W" : "L" });
+      const streakRow = wrap.createEl("div", { attr: { style: "display:flex;gap:6px;align-items:center;flex-wrap:wrap;" } });
+      streak.last5.forEach(({ trade: t, is_winner: w }) => {
+        const dot = streakRow.createEl("div", {
+          attr: { style: `width:22px;height:22px;border-radius:50%;background:${w ? "#4ade80" : "#f87171"};display:inline-flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:#000;cursor:pointer;flex-shrink:0;` },
+          text: w ? "W" : "L"
+        });
+        dot.setAttribute("title", `${t.exit_date} ${t.exit_time} \xB7 ${t.symbol} ${t.dir.toUpperCase()} \xB7 ${t.pnl >= 0 ? "+" : ""}$${t.pnl.toFixed(2)} \xB7 ${t.r_multiple}R`);
       });
       const mLabel = streak.momentum === "hot" ? "\u{1F525} Hot" : streak.momentum === "cold" ? "\u2744\uFE0F Cold" : "\u3030\uFE0F Mixed";
       streakRow.createEl("span", { text: mLabel, attr: { style: `color:${streak.momentum === "hot" ? "#facc15" : streak.momentum === "cold" ? "#60a5fa" : "var(--text-muted)"};font-size:11px;margin-left:4px;font-weight:700;` } });
@@ -1945,9 +2010,26 @@ var SidebarView = class extends import_obsidian3.ItemView {
       wrap.createEl("div", { text: `Open Positions (${open.length})`, attr: { style: "color:#facc15;font-size:11px;font-weight:700;margin-top:12px;margin-bottom:6px;" } });
       open.forEach((r) => {
         var _a;
-        const row = wrap.createEl("div", { attr: { style: "display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid var(--background-modifier-border);" } });
-        row.createEl("span", { text: `${r.symbol} ${(_a = r.dir) != null ? _a : ""}`, attr: { style: "color:var(--text-normal);font-size:11px;" } });
-        row.createEl("span", { text: `@${r.price}`, attr: { style: "color:var(--text-muted);font-size:11px;" } });
+        const baseId = r.trade_id;
+        const relatedExit = trades.find((t) => t.trade_id.replace(/#[0-9]+$/, "") === baseId);
+        const initialSize = relatedExit ? relatedExit.entry_size : r.size;
+        const currentSize = parseFloat(r.size.toFixed(4));
+        const pct = initialSize > 0 ? (currentSize / initialSize * 100).toFixed(0) : "\u2014";
+        const posWrap = wrap.createEl("div", { attr: { style: "padding:6px 0;border-bottom:1px solid var(--background-modifier-border);" } });
+        const row1 = posWrap.createEl("div", { attr: { style: "display:flex;justify-content:space-between;align-items:center;margin-bottom:3px;" } });
+        row1.createEl("span", { text: `${r.symbol} ${((_a = r.dir) != null ? _a : "").toUpperCase()}`, attr: { style: "color:var(--text-normal);font-size:12px;font-weight:700;" } });
+        row1.createEl("span", { text: `@$${r.price}`, attr: { style: "color:var(--text-muted);font-size:11px;" } });
+        const row2 = posWrap.createEl("div", { attr: { style: "display:flex;justify-content:space-between;align-items:center;margin-bottom:2px;" } });
+        row2.createEl("span", { text: `${currentSize} / ${initialSize} shares`, attr: { style: "color:var(--text-muted);font-size:10px;" } });
+        row2.createEl("span", {
+          text: `${pct}% open`,
+          attr: { style: `color:${Number(pct) > 50 ? "#facc15" : "#fb923c"};font-size:10px;font-weight:700;` }
+        });
+        if (r.target_sl) {
+          const row3 = posWrap.createEl("div", { attr: { style: "display:flex;justify-content:space-between;" } });
+          row3.createEl("span", { text: "Target SL", attr: { style: "color:var(--text-faint);font-size:10px;" } });
+          row3.createEl("span", { text: `$${r.target_sl}`, attr: { style: "color:#f87171;font-size:10px;font-weight:700;" } });
+        }
       });
     }
     wrap.createEl("div", { text: `\u21BB ${new Date(this.cache.getLastUpdated()).toLocaleTimeString()}`, attr: { style: "color:var(--text-faint);font-size:10px;margin-top:10px;text-align:center;" } });
