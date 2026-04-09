@@ -3,9 +3,10 @@ import { TradeCache, Trade, TradeRow, AccountEvent } from "./types";
 import { scanVaultForTrades, extractMarketScores } from "./parser";
 import { matchTrades } from "./matcher";
 
-const CACHE_FILE    = ".trading-journal-cache.json";
-const CACHE_VERSION = 2;
-const DEBOUNCE_MS   = 2000;
+const CACHE_FILE       = ".trading-journal-cache.json";
+const CACHE_VERSION    = 2;
+const DEBOUNCE_MS      = 2000;
+const MARKET_DATA_FILE = "Market Data.md";
 
 function emptyCache(): TradeCache {
   return {
@@ -118,11 +119,17 @@ export class CacheManager {
 
     const trigger = (file: TAbstractFile) => {
       if (!(file instanceof TFile)) return;
-      if (!file.path.startsWith("Master/Journal") && file.path !== "Accounts.md") return;
+      const isTradeFile = file.path.startsWith("Master/Journal") || file.path === "Accounts.md";
+      const isMarketData = file.path === MARKET_DATA_FILE;
+      if (!isTradeFile && !isMarketData) return;
 
       if (this.debounceTimer !== null) window.clearTimeout(this.debounceTimer);
       this.debounceTimer = window.setTimeout(() => {
-        this.buildCache(true);
+        if (isMarketData && !isTradeFile) {
+          this.notifyListeners();
+        } else {
+          this.buildCache(true);
+        }
         this.debounceTimer = null;
       }, DEBOUNCE_MS);
     };

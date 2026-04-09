@@ -237,10 +237,13 @@ function buildGradeStats(trades: Trade[]): Record<TradeGrade, GradeStats> {
 // ─── Main ─────────────────────────────────────────────────────────────────────
 export function calcStats(trades: Trade[], accountEvents: AccountEvent[], filters: TradeFilters): TradeStats {
   const ft      = filterTrades(trades, filters);
+  const initBal = accountEvents.filter(e=>(!filters.account||e.account===filters.account)&&e.type==="initial").reduce((s,e)=>s+e.amount,0)||10000;
+  const allEquity = buildEquity(trades.filter(t => !filters.account || t.account === filters.account), accountEvents, filters.account);
+  const currentBalance = allEquity[allEquity.length-1]?.value ?? initBal;
   const empty   = (): TradeStats => ({
     net_pnl:0, trade_count:0, exit_count:0, win_count:0, loss_count:0, win_rate:0, profit_factor:0, avg_win_loss_ratio:0,
-    avg_win:0, avg_loss:0, avg_r_multiple:0, largest_win:0, largest_loss:0,
-    day_win_rate:0, overall_roi:0, max_drawdown:0, max_drawdown_pct:0, current_balance:0,
+    avg_win:0, avg_loss:0, avg_r_multiple:0, avg_r_win:0, avg_r_loss:0, gain_to_pain:0, largest_win:0, largest_loss:0,
+    day_win_rate:0, overall_roi:0, max_drawdown:0, max_drawdown_pct:0, current_balance:parseFloat(currentBalance.toFixed(2)),
     streak: { last5:[], current_streak:0, longest_win:0, longest_loss:0, momentum:"none" },
     equity_curve:[], drawdown_curve:[], daily_pnl:[], weekly_pnl:[], monthly_pnl:[],
     pnl_by_slot:[], duration_by_outcome:[], pnl_by_strategy:{},
@@ -257,8 +260,6 @@ export function calcStats(trades: Trade[], accountEvents: AccountEvent[], filter
   const equity  = buildEquity(ft, accountEvents, filters.account);
   const dd      = buildDrawdown(equity);
   const maxDdPct= Math.abs(Math.min(...dd.map(d=>d.value)));
-  const initBal = accountEvents.filter(e=>(!filters.account||e.account===filters.account)&&e.type==="initial").reduce((s,e)=>s+e.amount,0)||10000;
-  const balance = equity[equity.length-1]?.value ?? initBal;
 
   // Fully closed aggregated trades (for win rate, PF, avg win/loss, avg R, ROI)
   const fullTrades = aggregateFullTrades(ft);
@@ -306,7 +307,10 @@ export function calcStats(trades: Trade[], accountEvents: AccountEvent[], filter
     avg_win:             ftWins.length>0?parseFloat((gw/ftWins.length).toFixed(2)):0,
     avg_loss:            ftLosses.length>0?parseFloat((gl/ftLosses.length).toFixed(2)):0,
     avg_r_multiple:      fullTrades.length>0?parseFloat((fullTrades.reduce((s,t)=>s+t.r_multiple,0)/fullTrades.length).toFixed(2)):0,
+    avg_r_win:           ftWins.length>0?parseFloat((ftWins.reduce((s,t)=>s+t.r_multiple,0)/ftWins.length).toFixed(2)):0,
+    avg_r_loss:          ftLosses.length>0?parseFloat((ftLosses.reduce((s,t)=>s+t.r_multiple,0)/ftLosses.length).toFixed(2)):0,
     avg_win_loss_ratio:  ftWins.length>0&&ftLosses.length>0?parseFloat(((gw/ftWins.length)/(gl/ftLosses.length)).toFixed(2)):0,
+    gain_to_pain:        gl>0?parseFloat((gw/gl).toFixed(2)):gw>0?Infinity:0,
     largest_win:         largestWinPnl  > 0 ? largestWinPnl  : 0,
     largest_win_trade:   largestWinTrade,
     largest_loss:        largestLossPnl < 0 ? Math.abs(largestLossPnl) : 0,
@@ -315,7 +319,7 @@ export function calcStats(trades: Trade[], accountEvents: AccountEvent[], filter
     overall_roi:         fullTrades.length>0?parseFloat((fullTrades.reduce((s,t)=>s+t.pnl,0)/initBal*100).toFixed(2)):0,
     max_drawdown:        parseFloat(Math.abs(maxDdPct*initBal/100).toFixed(2)),
     max_drawdown_pct:    parseFloat(maxDdPct.toFixed(2)),
-    current_balance:     parseFloat(balance.toFixed(2)),
+    current_balance:     parseFloat(currentBalance.toFixed(2)),
     streak:              buildStreak(ft),
     equity_curve:        equity,
     drawdown_curve:      dd,

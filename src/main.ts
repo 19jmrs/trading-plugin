@@ -2,19 +2,41 @@ import { Plugin, WorkspaceLeaf, ItemView, Notice } from "obsidian";
 import { CacheManager } from "./cache";
 import { calcStats, filterTrades, countUniqueTrades } from "./stats";
 import { TradeFilters } from "./types";
-import { renderDashboard } from "./dashboard";
+import { renderDashboard, DashboardRenderState } from "./dashboard";
+import { MarketMonitorService } from "./market-monitor";
 
 const DASHBOARD_VIEW = "trading-journal-dashboard";
 const SIDEBAR_VIEW   = "trading-journal-sidebar";
 
 class DashboardView extends ItemView {
   private cache:        CacheManager;
+  private marketMonitor: MarketMonitorService;
   private filters:      TradeFilters = {};
+  private dashboardState: DashboardRenderState = {
+    activeTab: "dashboard",
+    marketVisibleRows: 20,
+    marketDateFrom: "",
+    marketDateTo: "",
+    performanceVisibleRows: 15,
+    performanceDateFrom: "",
+    performanceDateTo: "",
+    chartDateFrom: (() => {
+      const dt = new Date();
+      dt.setDate(dt.getDate() - 30);
+      const y = dt.getFullYear();
+      const m = String(dt.getMonth() + 1).padStart(2, "0");
+      const d = String(dt.getDate()).padStart(2, "0");
+      return `${y}-${m}-${d}`;
+    })(),
+    chartDateTo: "",
+  };
   private unsubscribe:  (() => void) | null = null;
+  private renderSeq     = 0;
 
-  constructor(leaf: WorkspaceLeaf, cache: CacheManager) {
+  constructor(leaf: WorkspaceLeaf, cache: CacheManager, marketMonitor: MarketMonitorService) {
     super(leaf);
     this.cache = cache;
+    this.marketMonitor = marketMonitor;
   }
 
   getViewType()    { return DASHBOARD_VIEW; }
@@ -37,19 +59,25 @@ class DashboardView extends ItemView {
     this.unsubscribe = null;
   }
 
-  render(): void {
+  async render(): Promise<void> {
+    const seq = ++this.renderSeq;
     const container = this.containerEl.children[1] as HTMLElement;
     container.empty();
     container.style.cssText = "padding:0;overflow-y:auto;height:100%;";
 
     const allTrades = this.cache.getTrades();
+    const openRows  = this.cache.getOpenRows();
     const events    = this.cache.getAccountEvents();
     const filtered  = filterTrades(allTrades, this.filters);
     const stats     = calcStats(allTrades, events, this.filters);
+    const marketData = await this.marketMonitor.getDashboardData();
+    if (seq !== this.renderSeq) return;
 
-    renderDashboard(container, stats, filtered, events, this.filters,
-      (f) => { this.filters = f; this.render(); },
-      (filePath) => this.openFile(filePath)
+    renderDashboard(container, stats, filtered, openRows, events, this.filters,
+      (f) => { this.filters = f; void this.render(); },
+      (filePath) => this.openFile(filePath),
+      marketData,
+      this.dashboardState
     );
   }
 
@@ -68,6 +96,13 @@ class SidebarView extends ItemView {
   constructor(leaf: WorkspaceLeaf, cache: CacheManager) {
     super(leaf);
     this.cache = cache;
+  }
+
+  private async openFile(filePath: string): Promise<void> {
+    const file = this.app.vault.getAbstractFileByPath(filePath);
+    if (!file) return;
+    const leaf = this.app.workspace.getLeaf(false);
+    await leaf.openFile(file as any);
   }
 
   getViewType()    { return SIDEBAR_VIEW; }
@@ -103,6 +138,15 @@ class SidebarView extends ItemView {
 
     wrap.createEl("div", { text: "Trading Summary", attr: { style: "color:var(--text-normal);font-size:13px;font-weight:700;margin-bottom:10px;border-bottom:1px solid var(--background-modifier-border);padding-bottom:8px;" } });
 
+    const uniqueDirs = new Map<string, "long" | "short">();
+    trades.forEach(t => {
+      const baseId = t.trade_id.replace(/#\d+$/, "");
+      if (!uniqueDirs.has(baseId)) uniqueDirs.set(baseId, t.dir);
+    });
+    const totalUnique = uniqueDirs.size || 1;
+    const longPct = (([...uniqueDirs.values()].filter(v => v === "long").length / totalUnique) * 100).toFixed(1);
+    const shortPct = (([...uniqueDirs.values()].filter(v => v === "short").length / totalUnique) * 100).toFixed(1);
+
     const items = [
       { label:"Net P&L",       value:`$${stats.net_pnl.toFixed(2)}`,            color: stats.net_pnl>=0?"#4ade80":"#f87171" },
       { label:"Win Rate",      value:`${stats.win_rate}%`,                       color: stats.win_rate>=50?"#4ade80":"#f87171" },
@@ -113,9 +157,14 @@ class SidebarView extends ItemView {
       { label:"Avg Win",       value:`$${stats.avg_win.toFixed(2)}`,             color:"#4ade80" },
       { label:"Avg Loss",      value:`$${stats.avg_loss.toFixed(2)}`,            color:"#f87171" },
       { label:"Avg R",         value:`${stats.avg_r_multiple}R`,                 color: stats.avg_r_multiple>=0?"#4ade80":"#f87171" },
+      { label:"Avg R Win",     value:`${stats.avg_r_win}R`,                      color:"#4ade80" },
+      { label:"Avg R Loss",    value:`${stats.avg_r_loss}R`,                     color:"#f87171" },
+      { label:"Gain to Pain",  value:stats.gain_to_pain===Infinity?"∞":String(stats.gain_to_pain), color: stats.gain_to_pain>=1?"#4ade80":"#f87171" },
       { label:"Max DD",        value:`${stats.max_drawdown_pct.toFixed(1)}%`,    color:"#f87171" },
       { label:"ROI",           value:`${stats.overall_roi}%`,                    color: stats.overall_roi>=0?"#4ade80":"#f87171" },
       { label:"Balance",       value:`$${stats.current_balance.toFixed(2)}`,     color:"#60a5fa" },
+      { label:"Long %",        value:`${longPct}%`,                              color:Number(longPct)>=50?"#4ade80":"var(--text-muted)" },
+      { label:"Short %",       value:`${shortPct}%`,                             color:Number(shortPct)>=50?"#f87171":"var(--text-muted)" },
     ];
 
     items.forEach(item => {
@@ -135,6 +184,7 @@ class SidebarView extends ItemView {
         });
         // Simple title tooltip showing trade details
         dot.setAttribute("title", `${t.exit_date} ${t.exit_time} · ${t.symbol} ${t.dir.toUpperCase()} · ${t.pnl >= 0 ? "+" : ""}$${t.pnl.toFixed(2)} · ${t.r_multiple}R`);
+        dot.addEventListener("click", () => { void this.openFile(t.exit_file); });
       });
       const mLabel = streak.momentum==="hot"?"🔥 Hot":streak.momentum==="cold"?"❄️ Cold":"〰️ Mixed";
       streakRow.createEl("span", { text:mLabel, attr:{ style:`color:${streak.momentum==="hot"?"#facc15":streak.momentum==="cold"?"#60a5fa":"var(--text-muted)"};font-size:11px;margin-left:4px;font-weight:700;` } });
@@ -152,7 +202,8 @@ class SidebarView extends ItemView {
         const currentSize = parseFloat(r.size.toFixed(4));
         const pct         = initialSize > 0 ? ((currentSize / initialSize) * 100).toFixed(0) : "—";
 
-        const posWrap = wrap.createEl("div", { attr:{ style:"padding:6px 0;border-bottom:1px solid var(--background-modifier-border);" } });
+        const posWrap = wrap.createEl("div", { attr:{ style:"padding:6px 0;border-bottom:1px solid var(--background-modifier-border);cursor:pointer;" } });
+        posWrap.addEventListener("click", () => { if (r.filePath) void this.openFile(r.filePath); });
 
         // Row 1: Symbol + direction + entry price
         const row1 = posWrap.createEl("div", { attr:{ style:"display:flex;justify-content:space-between;align-items:center;margin-bottom:3px;" } });
@@ -169,9 +220,12 @@ class SidebarView extends ItemView {
 
         // Row 3: Target SL
         if (r.target_sl) {
+          const slPct = r.price > 0
+            ? ((r.dir === "short" ? (r.price - r.target_sl) : (r.target_sl - r.price)) / r.price) * 100
+            : 0;
           const row3 = posWrap.createEl("div", { attr:{ style:"display:flex;justify-content:space-between;" } });
           row3.createEl("span", { text:"Target SL", attr:{ style:"color:var(--text-faint);font-size:10px;" } });
-          row3.createEl("span", { text:`$${r.target_sl}`, attr:{ style:"color:#f87171;font-size:10px;font-weight:700;" } });
+          row3.createEl("span", { text:`$${r.target_sl} (${slPct >= 0 ? "+" : ""}${slPct.toFixed(1)}%)`, attr:{ style:"color:#f87171;font-size:10px;font-weight:700;" } });
         }
       });
     }
@@ -182,12 +236,14 @@ class SidebarView extends ItemView {
 
 export default class TradingJournalPlugin extends Plugin {
   private cache!: CacheManager;
+  private marketMonitor!: MarketMonitorService;
 
   async onload(): Promise<void> {
     this.cache = new CacheManager(this);
+    this.marketMonitor = new MarketMonitorService(this);
     await this.cache.initialize();
 
-    this.registerView(DASHBOARD_VIEW, leaf => new DashboardView(leaf, this.cache));
+    this.registerView(DASHBOARD_VIEW, leaf => new DashboardView(leaf, this.cache, this.marketMonitor));
     this.registerView(SIDEBAR_VIEW,   leaf => new SidebarView(leaf, this.cache));
 
     this.addRibbonIcon("bar-chart-2", "Trading Dashboard", () => this.openDashboard());
@@ -196,6 +252,20 @@ export default class TradingJournalPlugin extends Plugin {
     this.addCommand({
       id:"rebuild-trading-cache", name:"Rebuild Trading Cache",
       callback: async () => { await this.cache.rebuild(msg => console.log("Trading Journal:", msg)); }
+    });
+    this.addCommand({
+      id:"update-market-monitor-and-frontmatter",
+      name:"Update Market Data + Daily Frontmatter",
+      callback: async () => {
+        const result = await this.marketMonitor.syncActiveOrTodayNote();
+        if (result.updatedFrontmatter) {
+          new Notice(`Market data synced${result.updatedMarketData ? " and Market Data.md updated" : ""}`);
+        } else if (result.updatedMarketData) {
+          new Notice(`Market Data.md updated${result.skipped ? ` — ${result.skipped}` : ""}`);
+        } else {
+          new Notice(result.skipped ?? "No market monitor updates were applied.");
+        }
+      }
     });
 
     this.addCommand({
@@ -247,6 +317,10 @@ export default class TradingJournalPlugin extends Plugin {
         new Notice("Debug data dumped to console (Ctrl+Shift+I to open DevTools)");
       }
     });
+
+    this.registerEvent(this.app.vault.on("create", file => {
+      void this.marketMonitor.syncForCreatedFile(file);
+    }));
 
     this.app.workspace.onLayoutReady(() => this.openSidebar());
   }

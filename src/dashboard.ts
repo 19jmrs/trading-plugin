@@ -1,4 +1,17 @@
-import { Trade, AccountEvent, TradeStats, TradeFilters, StreakInfo } from "./types";
+import { Trade, TradeRow, AccountEvent, TradeStats, TradeFilters, StreakInfo } from "./types";
+import { MarketMonitorDashboardData, MarketMonitorMath, MarketMonitorTableRow, HighLowRow, AdvanceDeclineRow, PerformanceTrackRow } from "./market-monitor";
+
+export interface DashboardRenderState {
+  activeTab: "dashboard" | "trades" | "market";
+  marketVisibleRows: number;
+  marketDateFrom: string;
+  marketDateTo: string;
+  performanceVisibleRows: number;
+  performanceDateFrom: string;
+  performanceDateTo: string;
+  chartDateFrom: string;
+  chartDateTo: string;
+}
 
 // ─── Theme ────────────────────────────────────────────────────────────────────
 const C = {
@@ -41,10 +54,10 @@ function svg(p: HTMLElement, w: number, h: number): SVGSVGElement {
   s.setAttribute("viewBox", `0 0 ${w} ${h}`); s.setAttribute("width","100%"); s.setAttribute("height",String(h));
   p.appendChild(s); return s;
 }
-function sLine(s: SVGSVGElement, x1:number,y1:number,x2:number,y2:number,c:string,w=1):void {
-  const e=document.createElementNS(NS,"line");
+function sLine(s: SVGSVGElement, x1:number,y1:number,x2:number,y2:number,c:string,w=1): SVGLineElement {
+  const e=document.createElementNS(NS,"line") as SVGLineElement;
   e.setAttribute("x1",String(x1));e.setAttribute("y1",String(y1));e.setAttribute("x2",String(x2));e.setAttribute("y2",String(y2));
-  e.setAttribute("stroke",c);e.setAttribute("stroke-width",String(w));s.appendChild(e);
+  e.setAttribute("stroke",c);e.setAttribute("stroke-width",String(w));s.appendChild(e); return e;
 }
 function sPath(s:SVGSVGElement,d:string,stroke:string,fill="none",w=2):void {
   const e=document.createElementNS(NS,"path");
@@ -165,6 +178,15 @@ function addExpandBtn(parent: HTMLElement, title: string, renderFn: (container: 
     color:var(--text-muted);border-radius:4px;padding:1px 6px;
     cursor:pointer;font-size:11px;float:right;margin-top:-2px;
     font-family:${F};
+  `}});
+  btn.setAttribute("title", "Expand chart");
+  btn.addEventListener("click", () => showExpandModal(title, renderFn));
+}
+
+function addExpandLink(parent: HTMLElement, title: string, renderFn: (container: HTMLElement) => void): void {
+  const btn = parent.createEl("button", { text: "Expand ↗", attr: { style: `
+    background:transparent;border:none;color:${C.blue};padding:0;float:right;
+    cursor:pointer;font-size:10px;font-family:${F};font-weight:700;margin-top:1px;
   `}});
   btn.setAttribute("title", "Expand chart");
   btn.addEventListener("click", () => showExpandModal(title, renderFn));
@@ -796,8 +818,25 @@ function renderTradesList(parent: HTMLElement, trades: Trade[], openFile:(p:stri
 }
 
 // ─── Stats bar ────────────────────────────────────────────────────────────────
+function uniqueTradeDirStats(trades: Trade[]): { longPct: number; shortPct: number; total: number } {
+  const byId = new Map<string, "long" | "short">();
+  trades.forEach(t => {
+    const baseId = t.trade_id.replace(/#\d+$/, "");
+    if (!byId.has(baseId)) byId.set(baseId, t.dir);
+  });
+  const total = byId.size;
+  const longCount = [...byId.values()].filter(v => v === "long").length;
+  const shortCount = [...byId.values()].filter(v => v === "short").length;
+  return {
+    longPct: total ? parseFloat(((longCount / total) * 100).toFixed(1)) : 0,
+    shortPct: total ? parseFloat(((shortCount / total) * 100).toFixed(1)) : 0,
+    total,
+  };
+}
+
 function renderStatsBar(parent: HTMLElement, stats: TradeStats, trades: Trade[], onShowTrades:(t:Trade[])=>void, openFile:(p:string)=>void): void {
   const wrap=div(parent,`display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px;padding:12px 16px;`);
+  const dirStats = uniqueTradeDirStats(trades);
   const items=[
     {label:"Net P&L",      value:fmtUSD(stats.net_pnl),      color:pc(stats.net_pnl)},
     {label:"Win Rate",     value:`${stats.win_rate}%`,        color:stats.win_rate>=50?C.green:C.red},
@@ -809,9 +848,14 @@ function renderStatsBar(parent: HTMLElement, stats: TradeStats, trades: Trade[],
     {label:"Largest Loss", value:fmtUSD(-stats.largest_loss), color:C.red,   click:()=>stats.largest_loss_trade&&openFile(stats.largest_loss_trade.exit_file)},
     {label:"Avg W/L Ratio", value:String(stats.avg_win_loss_ratio), color:stats.avg_win_loss_ratio>=1?C.green:C.red, extra: stats.avg_win>0||stats.avg_loss>0 ? {win:stats.avg_win, loss:stats.avg_loss} : null},
     {label:"Avg R",        value:`${stats.avg_r_multiple}R`,  color:stats.avg_r_multiple>=0?C.green:C.red},
+    {label:"Avg R Win",    value:`${stats.avg_r_win}R`,       color:C.green},
+    {label:"Avg R Loss",   value:`${stats.avg_r_loss}R`,      color:C.red},
+    {label:"Gain to Pain", value:stats.gain_to_pain===Infinity?"∞":String(stats.gain_to_pain), color:stats.gain_to_pain>=1?C.green:C.red},
     {label:"Max DD",       value:`${stats.max_drawdown_pct.toFixed(1)}%`, color:C.red},
     {label:"ROI",          value:`${stats.overall_roi}%`,     color:pc(stats.overall_roi)},
     {label:"Balance",      value:fmtUSD(stats.current_balance),color:C.blue},
+    {label:"Long %",       value:`${dirStats.longPct}%`, color:dirStats.longPct>=50?C.green:C.text},
+    {label:"Short %",      value:`${dirStats.shortPct}%`, color:dirStats.shortPct>=50?C.red:C.text},
     {label:"Trades",       value:`${stats.trade_count} (${stats.exit_count} exits)`, color:C.text, click:()=>onShowTrades(trades)},
   ];
   items.forEach((item:any)=>{
@@ -844,14 +888,26 @@ function renderFilters(parent: HTMLElement, trades: Trade[], filters: TradeFilte
   const accounts  =[...new Set(trades.map(t=>t.account).filter(Boolean))];
   const symbols   =[...new Set(trades.map(t=>t.symbol).filter(Boolean))];
 
+  const monthStartIso = () => {
+    const d = new Date();
+    d.setDate(1);
+    return d.toISOString().split("T")[0];
+  };
+  const ytdStartIso = () => {
+    const d = new Date();
+    d.setMonth(0); d.setDate(1);
+    return d.toISOString().split("T")[0];
+  };
+
   const presets=[
-    {label:"All",days:0},{label:"1W",days:7},{label:"1M",days:30},
+    {label:"All",days:0},{label:"1W",days:7},{label:"MTD",days:-2},{label:"1M",days:30},
     {label:"3M",days:90},{label:"6M",days:180},{label:"YTD",days:-1}
   ];
 
   const isActive=(days:number)=>{
     if(days===0)  return !filters.date_from&&!filters.date_to;
-    if(days===-1){ const ytd=new Date();ytd.setMonth(0);ytd.setDate(1); return filters.date_from===ytd.toISOString().split("T")[0]&&!filters.date_to; }
+    if(days===-1) return filters.date_from===ytdStartIso()&&!filters.date_to;
+    if(days===-2) return filters.date_from===monthStartIso()&&!filters.date_to;
     const from=new Date(); from.setDate(from.getDate()-days);
     return filters.date_from===from.toISOString().split("T")[0]&&!filters.date_to;
   };
@@ -860,7 +916,8 @@ function renderFilters(parent: HTMLElement, trades: Trade[], filters: TradeFilte
     const btn=wrap.createEl("button",{text:p.label,attr:{style:isActive(p.days)?actSt:btnSt}});
     btn.addEventListener("click",()=>{
       if(p.days===0){ onChange({...filters,date_from:undefined,date_to:undefined}); }
-      else if(p.days===-1){ const ytd=new Date();ytd.setMonth(0);ytd.setDate(1); onChange({...filters,date_from:ytd.toISOString().split("T")[0],date_to:undefined}); }
+      else if(p.days===-1){ onChange({...filters,date_from:ytdStartIso(),date_to:undefined}); }
+      else if(p.days===-2){ onChange({...filters,date_from:monthStartIso(),date_to:undefined}); }
       else{ const from=new Date();from.setDate(from.getDate()-p.days); onChange({...filters,date_from:from.toISOString().split("T")[0],date_to:undefined}); }
     });
   });
@@ -891,19 +948,643 @@ function renderFilters(parent: HTMLElement, trades: Trade[], filters: TradeFilte
   });
 }
 
+function valueStyle(color: string, extra = ""): string {
+  return `color:${color};font-weight:700;${extra}`;
+}
+
+function rowPairStyles(left: number, right: number): [string, string] {
+  if (left > right) return [valueStyle(C.green), valueStyle(C.red)];
+  if (left < right) return [valueStyle(C.red), valueStyle(C.green)];
+  return ["color:var(--text-normal);font-weight:700;", "color:var(--text-normal);font-weight:700;"];
+}
+
+function metricCell(parent: HTMLElement, label: string, value: string): void {
+  const m = card(parent, "padding:12px;");
+  m.createEl("div", { text: label, attr: { style: `color:${C.muted};font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;margin-bottom:6px;font-family:${F};` } });
+  m.createEl("div", { text: value, attr: { style: `color:${C.text};font-size:18px;font-weight:700;font-family:${F};` } });
+}
+
+function filterOpenRows(openRows: TradeRow[], filters: TradeFilters): TradeRow[] {
+  return openRows.filter(r => {
+    if (filters.account && r.account !== filters.account) return false;
+    if (filters.strategy && r.strategy !== filters.strategy) return false;
+    if (filters.dir && r.dir !== filters.dir) return false;
+    if (filters.symbol && r.symbol.toUpperCase() !== filters.symbol.toUpperCase()) return false;
+    return true;
+  });
+}
+
+function polar(cx: number, cy: number, r: number, a: number): { x: number; y: number } {
+  const rad = (a - 90) * Math.PI / 180;
+  return { x: cx + r * Math.cos(rad), y: cy + r * Math.sin(rad) };
+}
+
+function donutPath(cx: number, cy: number, rOuter: number, rInner: number, start: number, end: number): string {
+  const p1 = polar(cx, cy, rOuter, start);
+  const p2 = polar(cx, cy, rOuter, end);
+  const p3 = polar(cx, cy, rInner, end);
+  const p4 = polar(cx, cy, rInner, start);
+  const large = end - start > 180 ? 1 : 0;
+  return [
+    `M ${p1.x} ${p1.y}`,
+    `A ${rOuter} ${rOuter} 0 ${large} 1 ${p2.x} ${p2.y}`,
+    `L ${p3.x} ${p3.y}`,
+    `A ${rInner} ${rInner} 0 ${large} 0 ${p4.x} ${p4.y}`,
+    "Z",
+  ].join(" ");
+}
+
+function renderOpenPositionsPie(parent: HTMLElement, openRows: TradeRow[], balance: number, openFile: (p:string)=>void): void {
+  const grouped = new Map<string, { label: string; value: number; filePath?: string }>();
+  openRows.forEach(r => {
+    const key = r.symbol;
+    const current = grouped.get(key);
+    const value = r.price * r.size;
+    grouped.set(key, { label: key, value: (current?.value ?? 0) + value, filePath: current?.filePath ?? r.filePath });
+  });
+
+  const positions = [...grouped.values()].sort((a, b) => b.value - a.value);
+  const openValue = positions.reduce((sum, p) => sum + p.value, 0);
+  const cashValue = Math.max(0, balance - openValue);
+  const slices = [...positions, { label: "Cash", value: cashValue, filePath: undefined }].filter(s => s.value > 0);
+  const total = slices.reduce((sum, s) => sum + s.value, 0) || 1;
+  const colors = [C.blue, C.green, C.purple, C.yellow, C.orange, "#f472b6", "#34d399", "#fb7185", "#22d3ee", "#c084fc", "#94a3b8"];
+
+  const wrap = div(parent, "display:grid;grid-template-columns:minmax(240px,320px) 1fr;gap:18px;align-items:center;");
+  const left = div(wrap, "display:flex;justify-content:center;");
+  const legend = div(wrap, "display:flex;flex-direction:column;gap:8px;");
+  const W = 260, H = 220, cx = 120, cy = 110, rOuter = 78, rInner = 44;
+  const s = svg(left, W, H);
+  const tt = makeTooltip(parent);
+
+  let angle = 0;
+  slices.forEach((slice, idx) => {
+    const pct = slice.value / total;
+    const start = angle;
+    const end = angle + pct * 360;
+    const path = document.createElementNS(NS, "path");
+    path.setAttribute("d", donutPath(cx, cy, rOuter, rInner, start, end));
+    path.setAttribute("fill", colors[idx % colors.length]);
+    path.style.cursor = slice.filePath ? "pointer" : "default";
+    s.appendChild(path);
+    path.addEventListener("mouseenter", (e: MouseEvent) => showTooltip(tt, e, el => {
+      el.createEl("div", { text: slice.label, attr: { style: `color:${C.text};font-weight:700;margin-bottom:4px;` } });
+      el.createEl("div", { text: `${fmtUSD(slice.value)} · ${fmt(pct * 100, 1)}%`, attr: { style: `color:${colors[idx % colors.length]};` } });
+    }));
+    path.addEventListener("mousemove", (e: MouseEvent) => moveTooltip(tt, e));
+    path.addEventListener("mouseleave", () => hideTooltip(tt));
+    if (slice.filePath) path.addEventListener("click", () => openFile(slice.filePath!));
+    angle = end;
+  });
+
+  sText(s, cx, cy - 6, "Open", C.muted, 10, "middle");
+  sText(s, cx, cy + 14, fmtUSD(openValue), C.text, 12, "middle");
+
+  slices.forEach((slice, idx) => {
+    const pct = slice.value / total;
+    const row = div(legend, `display:grid;grid-template-columns:14px 1fr auto auto;gap:8px;align-items:center;padding:6px 0;border-bottom:1px solid rgba(255,255,255,0.05);${slice.filePath?"cursor:pointer;":""}`);
+    row.createEl("div", { attr: { style: `width:10px;height:10px;border-radius:50%;background:${colors[idx % colors.length]};` } });
+    row.createEl("div", { text: slice.label, attr: { style: `color:${C.text};font-size:11px;font-weight:700;font-family:${F};` } });
+    row.createEl("div", { text: `${fmt(pct * 100, 1)}%`, attr: { style: `color:${C.muted};font-size:11px;font-family:${F};` } });
+    row.createEl("div", { text: fmtUSD(slice.value), attr: { style: `color:${C.text};font-size:11px;font-family:${F};` } });
+    if (slice.filePath) row.addEventListener("click", () => openFile(slice.filePath!));
+  });
+}
+
+function filterByDateRange<T extends { dateIso: string }>(rows: T[], from?: string, to?: string): T[] {
+  return rows.filter(row => (!from || row.dateIso >= from) && (!to || row.dateIso <= to));
+}
+
+function latestRows<T>(rows: T[], count: number): T[] {
+  return rows.slice(0, count);
+}
+
+function lastNDaysIso(days: number): string {
+  const dt = new Date();
+  dt.setDate(dt.getDate() - days);
+  const y = dt.getFullYear();
+  const m = String(dt.getMonth() + 1).padStart(2, "0");
+  const d = String(dt.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
+
+function formatChartTick(dateIso: string): string {
+  const m = dateIso.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return dateIso;
+  return `${m[2]}-${m[3]}`;
+}
+
+function seriesSma(values: Array<number | null>, period: number): Array<number | null> {
+  const out: Array<number | null> = new Array(values.length).fill(null);
+  for (let i = 0; i < values.length; i++) {
+    if (i + 1 < period) continue;
+    const slice = values.slice(i + 1 - period, i + 1);
+    if (slice.some(v => v === null)) continue;
+    const nums = slice as number[];
+    out[i] = nums.reduce((sum, value) => sum + value, 0) / period;
+  }
+  return out;
+}
+
+function chartPanel(parent: HTMLElement): HTMLElement {
+  return div(parent, `background:#10192d;border:1px solid rgba(148,163,184,0.18);border-radius:12px;padding:12px 12px 10px;`);
+}
+
+function drawXAxisTicks(s: SVGSVGElement, dates: string[], sx: (i: number) => number, y: number): void {
+  const tickCount = Math.min(5, dates.length);
+  for (let i = 0; i < tickCount; i++) {
+    const idx = Math.round((i / Math.max(tickCount - 1, 1)) * (dates.length - 1));
+    sText(s, sx(idx), y, formatChartTick(dates[idx]), C.faint, 8, "middle");
+  }
+}
+
+function renderOscillatorHistogram(
+  parent: HTMLElement,
+  data: { date: string; value: number }[],
+  footerLeft?: string,
+  footerLegend?: Array<{ label: string; color: string }>,
+  chartW = 900
+): void {
+  if (!data.length) {
+    parent.createEl("div", { text: "No data", attr: { style: `color:${C.muted};font-size:11px;` } });
+    return;
+  }
+
+  const panel = chartPanel(parent);
+  const W = chartW, H = Math.round(chartW * 0.26), P = { t: 10, r: 10, b: 28, l: 10 };
+  const W2 = W - P.l - P.r, H2 = H - P.t - P.b;
+  const minV = Math.min(...data.map(d => d.value), 0), maxV = Math.max(...data.map(d => d.value), 0);
+  const range = maxV - minV || 1;
+  const zeroY = P.t + H2 - ((0 - minV) / range) * H2;
+  const targetStep = Math.min(22, Math.max(12, W2 / Math.max(data.length, 1)));
+  const drawWidth = Math.min(W2, Math.max(data.length * targetStep, data.length * 6));
+  const startX = P.l + (W2 - drawWidth) / 2;
+  const step = drawWidth / Math.max(data.length, 1);
+  const bw = Math.max(5, Math.min(18, step * 0.94));
+  const s = svg(panel, W, H);
+  const tt = makeTooltip(panel);
+  const cross = sLine(s, P.l, P.t, P.l, P.t + H2, "rgba(148,163,184,0.35)");
+  cross.style.display = "none";
+
+  sLine(s, P.l, zeroY, W - P.r, zeroY, "rgba(148,163,184,0.18)");
+  [0.25, 0.5, 0.75].forEach(frac => {
+    const y = P.t + frac * H2;
+    sLine(s, P.l, y, W - P.r, y, "rgba(148,163,184,0.08)");
+  });
+
+  data.forEach((d, i) => {
+    const x = startX + i * step + (step - bw) / 2;
+    const y = P.t + H2 - ((d.value - minV) / range) * H2;
+    const top = Math.min(zeroY, y);
+    const h = Math.max(1, Math.abs(zeroY - y));
+    sRect(s, x, top, bw, h, d.value >= 0 ? "#35d2a0" : "#ff7d72", 1.5, `${d.date}: ${fmt(d.value, 0)}`);
+
+    const hit = sRect(s, startX + i * step, P.t, Math.max(step, 6), H2, "transparent", 0);
+    hit.style.cursor = "crosshair";
+    const showBarTooltip = (e: MouseEvent) => {
+      cross.setAttribute("x1", String(x + bw / 2));
+      cross.setAttribute("x2", String(x + bw / 2));
+      cross.style.display = "block";
+      showTooltip(tt, e, el => {
+        el.createEl("div", { text: d.date, attr: { style: `color:${C.text};font-weight:700;margin-bottom:4px;` } });
+        el.createEl("div", { text: `Value: ${fmt(d.value, 0)}`, attr: { style: `color:${d.value >= 0 ? C.green : C.red};` } });
+      });
+    };
+    hit.addEventListener("mouseenter", showBarTooltip);
+    hit.addEventListener("mousemove", e => { showBarTooltip(e); moveTooltip(tt, e); });
+    hit.addEventListener("mouseleave", () => { cross.style.display = "none"; hideTooltip(tt); });
+  });
+
+  drawXAxisTicks(s, data.map(d => d.date), i => startX + i * step + step / 2, H - 6);
+
+  const footer = div(panel, "display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:6px;flex-wrap:wrap;");
+  footer.createEl("div", { text: footerLeft ?? "", attr: { style: `color:${C.text};font-size:11px;font-family:${F};font-weight:700;` } });
+  if (footerLegend?.length) {
+    const legend = div(footer, "display:flex;gap:12px;align-items:center;flex-wrap:wrap;");
+    footerLegend.forEach(item => {
+      const entry = div(legend, "display:flex;gap:6px;align-items:center;");
+      entry.createEl("span", { text: "▌", attr: { style: `color:${item.color};font-size:12px;line-height:1;` } });
+      entry.createEl("span", { text: item.label, attr: { style: `color:${C.muted};font-size:10px;font-family:${F};` } });
+    });
+  }
+}
+
+function renderDualLineChart(
+  parent: HTMLElement,
+  primary: { date: string; value: number | null }[],
+  secondary: { date: string; value: number | null }[],
+  footerLeft: string,
+  primaryLabel: string,
+  secondaryLabel: string,
+  chartW = 900
+): void {
+  const paired = primary
+    .map((p, i) => ({ date: p.date, p: p.value, s: secondary[i]?.value ?? null }))
+    .filter(row => row.p !== null || row.s !== null);
+
+  if (paired.length < 2) {
+    parent.createEl("div", { text: "Not enough data", attr: { style: `color:${C.muted};font-size:11px;` } });
+    return;
+  }
+
+  const vals = paired.flatMap(row => [row.p, row.s]).filter((v): v is number => v !== null && Number.isFinite(v));
+  if (vals.length < 2) {
+    parent.createEl("div", { text: "Not enough data", attr: { style: `color:${C.muted};font-size:11px;` } });
+    return;
+  }
+
+  const panel = chartPanel(parent);
+  const W = chartW, H = Math.round(chartW * 0.26), P = { t: 10, r: 10, b: 28, l: 10 };
+  const W2 = W - P.l - P.r, H2 = H - P.t - P.b;
+  const minV = Math.min(...vals), maxV = Math.max(...vals), range = maxV - minV || 1;
+  const sx = (i: number) => P.l + (i / Math.max(paired.length - 1, 1)) * W2;
+  const sy = (v: number) => P.t + H2 - ((v - minV) / range) * H2;
+  const s = svg(panel, W, H);
+  const tt = makeTooltip(panel);
+  const cross = sLine(s, P.l, P.t, P.l, P.t + H2, "rgba(148,163,184,0.35)");
+  cross.style.display = "none";
+  const dot1 = sCircle(s, P.l, P.t, 3.5, "#4f8dfd", 1);
+  const dot2 = sCircle(s, P.l, P.t, 3.5, "#d4a514", 1);
+  dot1.style.display = "none";
+  dot2.style.display = "none";
+
+  [0.2, 0.5, 0.8].forEach(frac => {
+    const y = P.t + frac * H2;
+    sLine(s, P.l, y, W - P.r, y, "rgba(148,163,184,0.08)");
+  });
+
+  const buildPath = (key: "p" | "s") => {
+    let path = "";
+    paired.forEach((row, i) => {
+      const value = row[key];
+      if (value === null) return;
+      const cmd = path ? "L" : "M";
+      path += ` ${cmd} ${sx(i)} ${sy(value)}`;
+    });
+    return path.trim();
+  };
+
+  const primaryPath = buildPath("p");
+  const secondaryPath = buildPath("s");
+  if (primaryPath) sPath(s, primaryPath, "#4f8dfd", "none", 2.2);
+  if (secondaryPath) sPath(s, secondaryPath, "#d4a514", "none", 1.8);
+
+  paired.forEach((row, i) => {
+    const left = i === 0 ? P.l : (sx(i - 1) + sx(i)) / 2;
+    const right = i === paired.length - 1 ? W - P.r : (sx(i) + sx(i + 1)) / 2;
+    const hit = sRect(s, left, P.t, Math.max(6, right - left), H2, "transparent", 0);
+    hit.style.cursor = "crosshair";
+    const showPointTooltip = (e: MouseEvent) => {
+      const x = sx(i);
+      cross.setAttribute("x1", String(x));
+      cross.setAttribute("x2", String(x));
+      cross.style.display = "block";
+      if (row.p !== null) {
+        dot1.setAttribute("cx", String(x));
+        dot1.setAttribute("cy", String(sy(row.p)));
+        dot1.style.display = "block";
+      } else dot1.style.display = "none";
+      if (row.s !== null) {
+        dot2.setAttribute("cx", String(x));
+        dot2.setAttribute("cy", String(sy(row.s)));
+        dot2.style.display = "block";
+      } else dot2.style.display = "none";
+      showTooltip(tt, e, el => {
+        el.createEl("div", { text: row.date, attr: { style: `color:${C.text};font-weight:700;margin-bottom:4px;` } });
+        if (row.p !== null) el.createEl("div", { text: `${primaryLabel}: ${fmt(row.p, 0)}`, attr: { style: `color:#4f8dfd;` } });
+        if (row.s !== null) el.createEl("div", { text: `${secondaryLabel}: ${fmt(row.s, 0)}`, attr: { style: `color:#d4a514;` } });
+      });
+    };
+    hit.addEventListener("mouseenter", showPointTooltip);
+    hit.addEventListener("mousemove", e => { showPointTooltip(e); moveTooltip(tt, e); });
+    hit.addEventListener("mouseleave", () => {
+      cross.style.display = "none";
+      dot1.style.display = "none";
+      dot2.style.display = "none";
+      hideTooltip(tt);
+    });
+  });
+
+  drawXAxisTicks(s, paired.map(row => row.date), sx, H - 6);
+
+  const footer = div(panel, "display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:6px;flex-wrap:wrap;");
+  footer.createEl("div", { text: footerLeft, attr: { style: `color:${C.text};font-size:11px;font-family:${F};font-weight:700;` } });
+  const legend = div(footer, "display:flex;gap:12px;align-items:center;flex-wrap:wrap;");
+  [[primaryLabel, "#4f8dfd"], [secondaryLabel, "#d4a514"]].forEach(([label, color]) => {
+    const entry = div(legend, "display:flex;gap:6px;align-items:center;");
+    entry.createEl("span", { text: "—", attr: { style: `color:${color};font-size:14px;line-height:1;font-weight:700;` } });
+    entry.createEl("span", { text: label, attr: { style: `color:${C.muted};font-size:10px;font-family:${F};` } });
+  });
+}
+
+function renderMarketMonitorTable(
+  parent: HTMLElement,
+  rows: MarketMonitorTableRow[],
+  visibleRows: number,
+  onLoadMore: () => void,
+  dateFrom: string,
+  dateTo: string,
+  onDateChange: (field: "from" | "to", value: string) => void
+): void {
+  const controls = div(parent, "display:flex;gap:8px;align-items:end;justify-content:space-between;flex-wrap:wrap;margin-bottom:12px;");
+  const left = div(controls, "display:flex;gap:8px;align-items:end;flex-wrap:wrap;");
+  [["From", dateFrom, "from"], ["To", dateTo, "to"]].forEach(([label, value, field]) => {
+    const wrap = div(left, "display:flex;flex-direction:column;gap:4px;");
+    wrap.createEl("label", { text: String(label), attr: { style: `color:${C.muted};font-size:10px;font-family:${F};` } });
+    const input = wrap.createEl("input", { type: "date", value: String(value), attr: { style: `background:${C.card};border:1px solid ${C.border};color:${C.text};padding:6px 8px;border-radius:6px;font-family:${F};font-size:11px;` } });
+    input.addEventListener("change", () => onDateChange(field as "from" | "to", input.value));
+  });
+  const clearBtn = left.createEl("button", { text: "Clear", attr: { style: `background:transparent;border:1px solid ${C.border};color:${C.muted};border-radius:6px;padding:6px 10px;cursor:pointer;font-size:11px;font-family:${F};height:32px;` } });
+  clearBtn.addEventListener("click", () => { onDateChange("from", ""); onDateChange("to", ""); });
+
+  controls.createEl("div", { text: `Showing ${Math.min(rows.length, visibleRows)} / ${rows.length} rows`, attr: { style: `color:${C.muted};font-size:11px;font-family:${F};` } });
+
+  const wrap = div(parent, "overflow:auto;border:1px solid var(--background-modifier-border);border-radius:8px;");
+  const table = wrap.createEl("table", { attr: { style: `width:100%;border-collapse:collapse;font-size:11px;font-family:${F};min-width:1400px;` } });
+  const thead = table.createEl("thead");
+  const tbody = table.createEl("tbody");
+  const hdr = thead.createEl("tr", { attr: { style: `background:${C.card};position:sticky;top:0;` } });
+  ["Date","4%+ Up","4%+ Down","5d Ratio","10d Ratio","25%+ Q Up","25%+ Q Down","25%+ M Up","25%+ M Down","50%+ M Up","50%+ M Down","13%+ 34d Up","13%+ 34d Down","T2108"].forEach(h => {
+    hdr.createEl("th", { text: h, attr: { style: `padding:8px;border-bottom:1px solid ${C.border};text-align:right;color:${C.muted};font-size:10px;text-transform:uppercase;letter-spacing:0.5px;white-space:nowrap;` } });
+  });
+
+  latestRows(rows, visibleRows).forEach(row => {
+    const tr = tbody.createEl("tr", { attr: { style: `border-bottom:1px solid rgba(255,255,255,0.05);` } });
+    const pair1 = rowPairStyles(row.up4, row.down4);
+    const pair2 = rowPairStyles(row.upQuarter25, row.downQuarter25);
+    const pair3 = rowPairStyles(row.upMonth25, row.downMonth25);
+    const pair4 = rowPairStyles(row.upMonth50, row.downMonth50);
+    const pair5 = rowPairStyles(row.up34, row.down34);
+    const cells: Array<{ text: string; style?: string }> = [
+      { text: row.dateDisplay, style: `padding:8px;text-align:left;color:${C.text};font-weight:700;white-space:nowrap;` },
+      { text: String(row.up4), style: `padding:8px;text-align:right;${pair1[0]}` },
+      { text: String(row.down4), style: `padding:8px;text-align:right;${pair1[1]}` },
+      { text: row.ratio5 === null ? "-" : fmt(row.ratio5), style: `padding:8px;text-align:right;font-weight:700;background:${row.ratio5 !== null && row.ratio5 >= 1 ? "rgba(74,222,128,0.12)" : "transparent"};color:${row.ratio5 !== null && row.ratio5 >= 1 ? C.green : C.text};` },
+      { text: row.ratio10 === null ? "-" : fmt(row.ratio10), style: `padding:8px;text-align:right;font-weight:700;background:${row.ratio10 !== null && row.ratio10 >= 1 ? "rgba(74,222,128,0.12)" : "transparent"};color:${row.ratio10 !== null && row.ratio10 >= 1 ? C.green : C.text};` },
+      { text: String(row.upQuarter25), style: `padding:8px;text-align:right;${pair2[0]}` },
+      { text: String(row.downQuarter25), style: `padding:8px;text-align:right;${pair2[1]}` },
+      { text: String(row.upMonth25), style: `padding:8px;text-align:right;${pair3[0]}` },
+      { text: String(row.downMonth25), style: `padding:8px;text-align:right;${pair3[1]}` },
+      { text: String(row.upMonth50), style: `padding:8px;text-align:right;${pair4[0]}` },
+      { text: String(row.downMonth50), style: `padding:8px;text-align:right;${pair4[1]}` },
+      { text: String(row.up34), style: `padding:8px;text-align:right;${pair5[0]}` },
+      { text: String(row.down34), style: `padding:8px;text-align:right;${pair5[1]}` },
+      { text: row.t2108 === null ? "-" : fmt(row.t2108), style: `padding:8px;text-align:right;font-weight:700;color:${row.t2108 !== null && row.t2108 < 20 ? C.green : C.text};background:${row.t2108 !== null && row.t2108 < 20 ? "rgba(74,222,128,0.12)" : "transparent"};` },
+    ];
+    cells.forEach(cell => tr.createEl("td", { text: cell.text, attr: { style: cell.style ?? "padding:8px;" } }));
+  });
+
+  if (rows.length > visibleRows) {
+    const moreWrap = div(parent, "display:flex;justify-content:center;margin-top:12px;");
+    const more = moreWrap.createEl("button", { text: "Show 5 more", attr: { style: `background:transparent;border:1px solid ${C.border};color:${C.blue};border-radius:6px;padding:7px 12px;cursor:pointer;font-size:11px;font-family:${F};` } });
+    more.addEventListener("click", onLoadMore);
+  }
+}
+
+function renderMarketMonitorStats(parent: HTMLElement, rows: MarketMonitorTableRow[]): void {
+  const ratios5 = rows.map(r => r.ratio5).filter((v): v is number => v !== null);
+  const ratios10 = rows.map(r => r.ratio10).filter((v): v is number => v !== null);
+  const t2108 = rows.map(r => r.t2108).filter((v): v is number => v !== null);
+  const grid = div(parent, "display:grid;grid-template-columns:repeat(6,minmax(140px,1fr));gap:10px;margin-bottom:12px;");
+  metricCell(grid, "Avg 5 Day Ratio", ratios5.length ? fmt(MarketMonitorMath.average(ratios5) ?? 0) : "-");
+  metricCell(grid, "Avg 10 Day Ratio", ratios10.length ? fmt(MarketMonitorMath.average(ratios10) ?? 0) : "-");
+  metricCell(grid, "Max 4% Up", rows.length ? String(Math.max(...rows.map(r => r.up4))) : "-");
+  metricCell(grid, "Max 4% Down", rows.length ? String(Math.max(...rows.map(r => r.down4))) : "-");
+  metricCell(grid, "T2108 Max / Min", t2108.length ? `${fmt(Math.max(...t2108), 0)} / ${fmt(Math.min(...t2108), 0)}` : "-");
+  metricCell(grid, "T2108 Avg", t2108.length ? fmt(MarketMonitorMath.average(t2108) ?? 0) : "-");
+}
+
+function renderPerformanceTrackStats(parent: HTMLElement, rows: PerformanceTrackRow[]): void {
+  const metrics = [
+    { label: "8%+ Up 5d", values: rows.map(r => r.up8_5d) },
+    { label: "8%+ Down 5d", values: rows.map(r => r.down8_5d) },
+    { label: "20%+ Up 5d", values: rows.map(r => r.up20_5d) },
+    { label: "20%+ Down 5d", values: rows.map(r => r.down20_5d) },
+    { label: "%Above 21SMA", values: rows.map(r => r.above21sma) },
+    { label: "%Above 200SMA", values: rows.map(r => r.above200sma) },
+  ];
+  const grid = div(parent, "display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin-bottom:12px;");
+  metrics.forEach(metric => {
+    const vals = metric.values;
+    const avg = vals.length ? MarketMonitorMath.average(vals) ?? 0 : null;
+    const min = vals.length ? Math.min(...vals) : null;
+    const max = vals.length ? Math.max(...vals) : null;
+    const c = card(grid, "padding:12px;");
+    c.createEl("div", { text: metric.label, attr: { style: `color:${C.muted};font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;margin-bottom:6px;font-family:${F};` } });
+    c.createEl("div", { text: avg === null ? "-" : `Avg ${fmt(avg, 1)}`, attr: { style: `color:${C.text};font-size:16px;font-weight:700;font-family:${F};margin-bottom:4px;` } });
+    c.createEl("div", { text: min === null || max === null ? "-" : `Min ${fmt(min, 1)} · Max ${fmt(max, 1)}`, attr: { style: `color:${C.muted};font-size:10px;font-family:${F};` } });
+  });
+}
+
+function renderPerformanceTracksTable(
+  parent: HTMLElement,
+  rows: PerformanceTrackRow[],
+  visibleRows: number,
+  onLoadMore: () => void,
+  dateFrom: string,
+  dateTo: string,
+  onDateChange: (field: "from" | "to", value: string) => void
+): void {
+  const avg21 = rows.length ? MarketMonitorMath.average(rows.map(r => r.above21sma)) ?? 0 : 0;
+  const avg200 = rows.length ? MarketMonitorMath.average(rows.map(r => r.above200sma)) ?? 0 : 0;
+  const controls = div(parent, "display:flex;gap:8px;align-items:end;justify-content:space-between;flex-wrap:wrap;margin-bottom:12px;");
+  const left = div(controls, "display:flex;gap:8px;align-items:end;flex-wrap:wrap;");
+  [["From", dateFrom, "from"], ["To", dateTo, "to"]].forEach(([label, value, field]) => {
+    const wrap = div(left, "display:flex;flex-direction:column;gap:4px;");
+    wrap.createEl("label", { text: String(label), attr: { style: `color:${C.muted};font-size:10px;font-family:${F};` } });
+    const input = wrap.createEl("input", { type: "date", value: String(value), attr: { style: `background:${C.card};border:1px solid ${C.border};color:${C.text};padding:6px 8px;border-radius:6px;font-family:${F};font-size:11px;` } });
+    input.addEventListener("change", () => onDateChange(field as "from" | "to", input.value));
+  });
+  const clearBtn = left.createEl("button", { text: "Clear", attr: { style: `background:transparent;border:1px solid ${C.border};color:${C.muted};border-radius:6px;padding:6px 10px;cursor:pointer;font-size:11px;font-family:${F};height:32px;` } });
+  clearBtn.addEventListener("click", () => { onDateChange("from", ""); onDateChange("to", ""); });
+  controls.createEl("div", { text: `Showing ${Math.min(rows.length, visibleRows)} / ${rows.length} rows`, attr: { style: `color:${C.muted};font-size:11px;font-family:${F};` } });
+
+  const wrap = div(parent, "overflow:auto;border:1px solid var(--background-modifier-border);border-radius:8px;");
+  const table = wrap.createEl("table", { attr: { style: `width:100%;border-collapse:collapse;font-size:11px;font-family:${F};min-width:920px;` } });
+  const thead = table.createEl("thead");
+  const tbody = table.createEl("tbody");
+  const hdr = thead.createEl("tr", { attr: { style: `background:${C.card};position:sticky;top:0;` } });
+  ["Date","8%+ Up 5d","8%+ Down 5d","20%+ Up 5d","20%+ Down 5d","%Above 21SMA","%Above 200SMA"].forEach(h => {
+    hdr.createEl("th", { text: h, attr: { style: `padding:8px;border-bottom:1px solid ${C.border};text-align:right;color:${C.muted};font-size:10px;text-transform:uppercase;letter-spacing:0.5px;white-space:nowrap;` } });
+  });
+
+  latestRows(rows, visibleRows).forEach(row => {
+    const tr = tbody.createEl("tr", { attr: { style: `border-bottom:1px solid rgba(255,255,255,0.05);` } });
+    const pair8 = rowPairStyles(row.up8_5d, row.down8_5d);
+    const pair20 = rowPairStyles(row.up20_5d, row.down20_5d);
+    const cells: Array<{ text: string; style: string }> = [
+      { text: row.dateDisplay, style: `padding:8px;text-align:left;color:${C.text};font-weight:700;white-space:nowrap;` },
+      { text: fmt(row.up8_5d, 0), style: `padding:8px;text-align:right;${pair8[0]}` },
+      { text: fmt(row.down8_5d, 0), style: `padding:8px;text-align:right;${pair8[1]}` },
+      { text: fmt(row.up20_5d, 0), style: `padding:8px;text-align:right;${pair20[0]}` },
+      { text: fmt(row.down20_5d, 0), style: `padding:8px;text-align:right;${pair20[1]}` },
+      { text: fmt(row.above21sma, 1), style: `padding:8px;text-align:right;font-weight:700;color:${row.above21sma >= avg21 ? C.green : C.red};` },
+      { text: fmt(row.above200sma, 1), style: `padding:8px;text-align:right;font-weight:700;color:${row.above200sma >= avg200 ? C.green : C.red};` },
+    ];
+    cells.forEach(cell => tr.createEl("td", { text: cell.text, attr: { style: cell.style } }));
+  });
+
+  if (rows.length > visibleRows) {
+    const moreWrap = div(parent, "display:flex;justify-content:center;margin-top:12px;");
+    const more = moreWrap.createEl("button", { text: "Show 5 more", attr: { style: `background:transparent;border:1px solid ${C.border};color:${C.blue};border-radius:6px;padding:7px 12px;cursor:pointer;font-size:11px;font-family:${F};` } });
+    more.addEventListener("click", onLoadMore);
+  }
+}
+
+function renderMarketCharts(
+  parent: HTMLElement,
+  highLowRows: HighLowRow[],
+  adRows: AdvanceDeclineRow[],
+  chartFrom: string,
+  chartTo: string,
+  onChartRange: (from: string, to: string) => void
+): void {
+  const controls = div(parent, "display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:12px;");
+  const btnWrap = div(controls, "display:flex;gap:8px;flex-wrap:wrap;");
+  [
+    ["1M", 30],
+    ["3M", 90],
+    ["6M", 180],
+    ["1Y", 365],
+  ].forEach(([label, days]) => {
+    const active = chartFrom === lastNDaysIso(days as number) && chartTo === "";
+    const btn = btnWrap.createEl("button", { text: String(label), attr: { style: `${active ? `background:rgba(96,165,250,0.15);color:${C.blue};border:1px solid ${C.blue};` : `background:transparent;color:${C.muted};border:1px solid ${C.border};`}border-radius:6px;padding:6px 10px;cursor:pointer;font-size:11px;font-family:${F};` } });
+    btn.addEventListener("click", () => onChartRange(lastNDaysIso(days as number), ""));
+  });
+  const allBtn = btnWrap.createEl("button", { text: "All", attr: { style: `${!chartFrom && !chartTo ? `background:rgba(96,165,250,0.15);color:${C.blue};border:1px solid ${C.blue};` : `background:transparent;color:${C.muted};border:1px solid ${C.border};`}border-radius:6px;padding:6px 10px;cursor:pointer;font-size:11px;font-family:${F};` } });
+  allBtn.addEventListener("click", () => onChartRange("", ""));
+  controls.createEl("div", { text: "Chart range", attr: { style: `color:${C.muted};font-size:11px;font-family:${F};` } });
+
+  const highLowSeries = MarketMonitorMath.sortAscByDate(filterByDateRange(highLowRows, chartFrom || undefined, chartTo || undefined));
+  const adSeries = MarketMonitorMath.sortAscByDate(filterByDateRange(adRows, chartFrom || undefined, chartTo || undefined));
+  const summationValues = adSeries.map(r => r.summation);
+  const summationSma10 = seriesSma(summationValues, 10);
+  const latestMc = [...adSeries].reverse().find(r => r.mcclellan !== null)?.mcclellan ?? null;
+  const latestSum = [...adSeries].reverse().find(r => r.summation !== null)?.summation ?? null;
+  const latestSma = [...summationSma10].reverse().find(v => v !== null) ?? null;
+  const latestHl = highLowSeries.length ? highLowSeries[highLowSeries.length - 1].net : null;
+  const latestHigh = highLowSeries.length ? highLowSeries[highLowSeries.length - 1].high52 : 0;
+  const latestLow = highLowSeries.length ? highLowSeries[highLowSeries.length - 1].low52 : 0;
+
+  const stack = div(parent, "display:grid;grid-template-columns:1fr;gap:12px;");
+
+  const mcoData = adSeries.filter(r => r.mcclellan !== null).map(r => ({ date: r.dateIso, value: r.mcclellan ?? 0 }));
+  const sumPrimary = adSeries.map(r => ({ date: r.dateIso, value: r.summation }));
+  const sumSecondary = adSeries.map((r, i) => ({ date: r.dateIso, value: summationSma10[i] }));
+  const hlData = highLowSeries.map(r => ({ date: r.dateIso, value: r.net }));
+
+  const mc = card(stack);
+  cardTitle(mc, "McClellan Oscillator");
+  if (adSeries.length < 39) {
+    mc.createEl("div", { text: `Need at least 39 Advance/Decline rows to calculate McClellan Oscillator (${adSeries.length} loaded).`, attr: { style: `color:${C.muted};font-size:11px;` } });
+  } else {
+    addExpandLink(mc, "McClellan Oscillator", c => renderOscillatorHistogram(c, mcoData, latestMc === null ? "" : `MCO ${fmt(latestMc, 0)}`, [], 1100));
+    renderOscillatorHistogram(
+      mc,
+      mcoData,
+      latestMc === null ? "" : `MCO ${fmt(latestMc, 0)}`,
+      [],
+      900
+    );
+  }
+
+  const si = card(stack);
+  cardTitle(si, "Summation Index + 10 SMA");
+  if (adSeries.length < 39) {
+    si.createEl("div", { text: `Need at least 39 Advance/Decline rows to calculate Summation Index (${adSeries.length} loaded).`, attr: { style: `color:${C.muted};font-size:11px;` } });
+  } else {
+    addExpandLink(si, "Summation Index + 10 SMA", c => renderDualLineChart(c, sumPrimary, sumSecondary, latestSum === null ? "" : `MCSI ${fmt(latestSum, 0)}`, latestSum === null ? "MCSI" : `MCSI ${fmt(latestSum, 0)}`, latestSma === null ? "10 SMA" : `10 SMA ${fmt(latestSma, 0)}`, 1100));
+    renderDualLineChart(
+      si,
+      sumPrimary,
+      sumSecondary,
+      latestSum === null ? "" : `MCSI ${fmt(latestSum, 0)}`,
+      latestSum === null ? "MCSI" : `MCSI ${fmt(latestSum, 0)}`,
+      latestSma === null ? "10 SMA" : `10 SMA ${fmt(latestSma, 0)}`,
+      900
+    );
+  }
+
+  const hl = card(stack);
+  addExpandLink(hl, "52-Week H/L Oscillator", c => renderOscillatorHistogram(c, hlData, latestHl === null ? "" : `${fmt(latestHl, 0)} (${fmt(latestHigh, 0)}H / ${fmt(latestLow, 0)}L)`, [
+      { label: "Net Highs", color: "#35d2a0" },
+      { label: "Net Lows", color: "#ff7d72" },
+    ], 1100));
+  cardTitle(hl, "52-Week H/L Oscillator");
+  renderOscillatorHistogram(
+    hl,
+    hlData,
+    latestHl === null ? "" : `${fmt(latestHl, 0)} (${fmt(latestHigh, 0)}H / ${fmt(latestLow, 0)}L)`,
+    [
+      { label: "Net Highs", color: "#35d2a0" },
+      { label: "Net Lows", color: "#ff7d72" },
+    ],
+    900
+  );
+}
+
+function renderMarketMonitorView(
+  container: HTMLElement,
+  marketData: MarketMonitorDashboardData | null,
+  visibleRows: number,
+  onLoadMore: () => void,
+  tableFrom: string,
+  tableTo: string,
+  onTableDateChange: (field: "from" | "to", value: string) => void,
+  performanceVisibleRows: number,
+  onPerformanceLoadMore: () => void,
+  performanceDateFrom: string,
+  performanceDateTo: string,
+  onPerformanceDateChange: (field: "from" | "to", value: string) => void,
+  chartFrom: string,
+  chartTo: string,
+  onChartRange: (from: string, to: string) => void
+): void {
+  if (!marketData) {
+    const empty = card(container, "margin:12px 16px 16px;");
+    cardTitle(empty, "Market Monitor");
+    empty.createEl("div", { text: "Market Data.md could not be loaded or parsed.", attr: { style: `color:${C.muted};font-size:12px;` } });
+    return;
+  }
+
+  const filteredRows = filterByDateRange(marketData.monitorRows, tableFrom || undefined, tableTo || undefined);
+  const statsCard = card(container, "margin:12px 16px 0;");
+  cardTitle(statsCard, "Market Monitor Stats");
+  renderMarketMonitorStats(statsCard, filteredRows);
+
+  const tableCard = card(container, "margin:12px 16px 0;");
+  cardTitle(tableCard, "Market Monitor Table");
+  renderMarketMonitorTable(tableCard, filteredRows, visibleRows, onLoadMore, tableFrom, tableTo, onTableDateChange);
+
+  const performanceRows = filterByDateRange(marketData.performanceTrackRows, performanceDateFrom || undefined, performanceDateTo || undefined);
+  const perfStats = card(container, "margin:12px 16px 0;");
+  cardTitle(perfStats, "Performance Tracks Stats");
+  renderPerformanceTrackStats(perfStats, performanceRows);
+
+  const perfTable = card(container, "margin:12px 16px 0;");
+  cardTitle(perfTable, "Performance Tracks");
+  renderPerformanceTracksTable(perfTable, performanceRows, performanceVisibleRows, onPerformanceLoadMore, performanceDateFrom, performanceDateTo, onPerformanceDateChange);
+
+  const chartCard = card(container, "margin:12px 16px 16px;");
+  cardTitle(chartCard, "Breadth Charts");
+  renderMarketCharts(chartCard, marketData.highLowRows, marketData.advanceDeclineRows, chartFrom, chartTo, onChartRange);
+}
+
 // ─── Main render ──────────────────────────────────────────────────────────────
 export function renderDashboard(
   container: HTMLElement,
   stats: TradeStats,
   trades: Trade[],
+  openRows: TradeRow[],
   events: AccountEvent[],
   filters: TradeFilters,
   onFilterChange: (f:TradeFilters)=>void,
-  openFile: (p:string)=>void
+  openFile: (p:string)=>void,
+  marketData: MarketMonitorDashboardData | null,
+  state: DashboardRenderState
 ): void {
   container.style.cssText=`background:${C.bg};min-height:100%;font-family:${F};color:${C.text};`;
 
-  let showTradesList=false;
   let tradeListData: Trade[] = trades;
 
   const redraw=()=>{
@@ -913,26 +1594,53 @@ export function renderDashboard(
     // Header
     const hdr=div(container,`display:flex;align-items:center;justify-content:space-between;padding:14px 16px;border-bottom:1px solid ${C.border};background:${C.card};`);
     hdr.createEl("div",{text:"Trading Dashboard",attr:{style:`color:${C.text};font-size:18px;font-weight:700;font-family:${F};`}});
-    const hRight=div(hdr,"display:flex;align-items:center;gap:8px;");
+    const hRight=div(hdr,"display:flex;align-items:center;gap:8px;flex-wrap:wrap;");
     hRight.createEl("div",{text:`${trades.length} total trades`,attr:{style:`color:${C.muted};font-size:11px;`}});
 
     const actTab=`background:rgba(96,165,250,0.15);color:${C.blue};border:1px solid ${C.blue};border-radius:6px;padding:5px 12px;font-size:11px;cursor:pointer;font-family:${F};`;
     const inTab =`background:transparent;color:${C.muted};border:1px solid ${C.border};border-radius:6px;padding:5px 12px;font-size:11px;cursor:pointer;font-family:${F};`;
-    const dashBtn  =hRight.createEl("button",{text:"Dashboard",attr:{style:!showTradesList?actTab:inTab}});
-    const tradesBtn=hRight.createEl("button",{text:"Trades",    attr:{style:showTradesList ?actTab:inTab}});
-    dashBtn.addEventListener("click",()=>{ showTradesList=false; redraw(); });
-    tradesBtn.addEventListener("click",()=>{ showTradesList=true; tradeListData=trades; redraw(); });
+    const dashBtn  =hRight.createEl("button",{text:"Dashboard",attr:{style:state.activeTab==="dashboard"?actTab:inTab}});
+    const tradesBtn=hRight.createEl("button",{text:"Trades",attr:{style:state.activeTab==="trades"?actTab:inTab}});
+    const marketBtn=hRight.createEl("button",{text:"Market Monitor",attr:{style:state.activeTab==="market"?actTab:inTab}});
+    dashBtn.addEventListener("click",()=>{ state.activeTab="dashboard"; redraw(); });
+    tradesBtn.addEventListener("click",()=>{ state.activeTab="trades"; tradeListData=trades; redraw(); });
+    marketBtn.addEventListener("click",()=>{ state.activeTab="market"; redraw(); });
 
-    const onShowTrades=(t:Trade[])=>{ showTradesList=true; tradeListData=t; redraw(); };
+    const onShowTrades=(t:Trade[])=>{ state.activeTab="trades"; tradeListData=t; redraw(); };
 
-    renderFilters(container, trades, filters, (f)=>{ onFilterChange(f); });
+    if(state.activeTab!=="market") renderFilters(container, trades, filters, (f)=>{ onFilterChange(f); });
 
-    if(showTradesList){
+    if(state.activeTab==="trades"){
       renderTradesList(div(container,"padding:16px;"), tradeListData, openFile);
+      return;
+    }
+    if(state.activeTab==="market"){
+      renderMarketMonitorView(
+        container,
+        marketData,
+        state.marketVisibleRows,
+        ()=>{ state.marketVisibleRows += 5; redraw(); },
+        state.marketDateFrom,
+        state.marketDateTo,
+        (field, value)=>{ if(field==="from") state.marketDateFrom=value; else state.marketDateTo=value; state.marketVisibleRows=20; redraw(); },
+        state.performanceVisibleRows,
+        ()=>{ state.performanceVisibleRows += 5; redraw(); },
+        state.performanceDateFrom,
+        state.performanceDateTo,
+        (field, value)=>{ if(field==="from") state.performanceDateFrom=value; else state.performanceDateTo=value; state.performanceVisibleRows=15; redraw(); },
+        state.chartDateFrom,
+        state.chartDateTo,
+        (from, to)=>{ state.chartDateFrom=from; state.chartDateTo=to; redraw(); }
+      );
       return;
     }
 
     renderStatsBar(container, stats, trades, onShowTrades, openFile);
+
+    const filteredOpenRows = filterOpenRows(openRows, filters);
+    const op=card(container,"margin:0 16px 0;");
+    cardTitle(op,"Open Positions vs Cash");
+    renderOpenPositionsPie(op, filteredOpenRows, stats.current_balance, openFile);
 
     // Row 1: Equity + Drawdown
     const g1=div(container,"display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:12px 16px 0;");

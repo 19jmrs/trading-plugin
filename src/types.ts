@@ -95,7 +95,10 @@ export interface TradeStats {
   avg_win:             number;
   avg_loss:            number;
   avg_r_multiple:      number;
+  avg_r_win:           number;
+  avg_r_loss:          number;
   avg_win_loss_ratio:  number;   // avg win / avg loss
+  gain_to_pain:        number;
   largest_win:         number;
   largest_win_trade?:  Trade;
   largest_loss:        number;
