@@ -2339,6 +2339,7 @@ function renderTradesList(parent, trades, openFile) {
     { label: "Close", key: "exit_date" },
     { label: "Entry" },
     { label: "Avg Exit" },
+    { label: "Entry Shares", key: "entry_size" },
     { label: "Shares", key: "filled_size" },
     { label: "Net P&L", key: "pnl" },
     { label: "ROI", key: "pnl_pct" },
@@ -2406,6 +2407,8 @@ function renderTradesList(parent, trades, openFile) {
       return t.exit_date;
     if (k === "symbol")
       return t.symbol;
+    if (k === "entry_size")
+      return t.entry_size;
     if (k === "filled_size")
       return t.filled_size;
     if (k === "pnl")
@@ -2452,6 +2455,7 @@ function renderTradesList(parent, trades, openFile) {
         { v: t.exit_date, c: C.muted },
         { v: `$${t.entry_price}`, c: C.text },
         { v: `$${t.exit_price}`, c: C.text },
+        { v: String(t.entry_size), c: C.text },
         { v: String(t.filled_size), c: C.text },
         { v: fmtUSD(t.pnl), c: pc(t.pnl), bold: true },
         { v: `${fmt(t.pnl_pct, 2)}%`, c: pc(t.pnl) },
@@ -3220,12 +3224,12 @@ function renderMarketMonitorView(container, marketData, visibleRows, onLoadMore,
   renderMarketCharts(chartCard, marketData.highLowRows, marketData.advanceDeclineRows, chartFrom, chartTo, onChartRange);
 }
 function renderDashboard(container, stats, trades, openRows, openAnalytics, events, filters, onFilterChange, openFile, marketData, state) {
-  container.style.cssText = `background:${C.bg};min-height:100%;font-family:${F};color:${C.text};`;
+  container.style.cssText = `background:${C.bg};height:100%;display:flex;flex-direction:column;overflow:hidden;font-family:${F};color:${C.text};`;
   let tradeListData = trades;
   const redraw = () => {
     container.empty();
-    container.style.cssText = `background:${C.bg};min-height:100%;font-family:${F};color:${C.text};`;
-    const hdr = div(container, `display:flex;align-items:center;justify-content:space-between;padding:14px 16px;border-bottom:1px solid ${C.border};background:${C.card};`);
+    container.style.cssText = `background:${C.bg};height:100%;display:flex;flex-direction:column;overflow:hidden;font-family:${F};color:${C.text};`;
+    const hdr = div(container, `display:flex;align-items:center;justify-content:space-between;padding:14px 16px;border-bottom:1px solid ${C.border};background:${C.card};flex-shrink:0;position:sticky;top:0;z-index:50;`);
     hdr.createEl("div", { text: "Trading Dashboard", attr: { style: `color:${C.text};font-size:18px;font-weight:700;font-family:${F};` } });
     const hRight = div(hdr, "display:flex;align-items:center;gap:8px;flex-wrap:wrap;");
     hRight.createEl("div", { text: `${trades.length} total trades`, attr: { style: `color:${C.muted};font-size:11px;` } });
@@ -3256,13 +3260,14 @@ function renderDashboard(container, stats, trades, openRows, openAnalytics, even
       renderFilters(container, trades, filters, (f) => {
         onFilterChange(f);
       });
+    const content = div(container, "flex:1;min-height:0;overflow-y:auto;");
     if (state.activeTab === "trades") {
-      renderTradesList(div(container, "padding:16px;"), tradeListData, openFile);
+      renderTradesList(div(content, "padding:16px;height:100%;box-sizing:border-box;"), tradeListData, openFile);
       return;
     }
     if (state.activeTab === "market") {
       renderMarketMonitorView(
-        container,
+        content,
         marketData,
         state.marketVisibleRows,
         () => {
@@ -3304,15 +3309,15 @@ function renderDashboard(container, stats, trades, openRows, openAnalytics, even
       );
       return;
     }
-    renderStatsBar(container, stats, trades, openAnalytics, onShowTrades, openFile);
+    renderStatsBar(content, stats, trades, openAnalytics, onShowTrades, openFile);
     const filteredOpenRows = filterOpenRows(openRows, filters);
-    const op = card(container, "margin:0 16px 0;");
+    const op = card(content, "margin:0 16px 0;");
     cardTitle(op, "Open Positions vs Cash");
     renderOpenPositionsPie(op, filteredOpenRows, stats.current_balance, openFile);
-    const od = card(container, "margin:12px 16px 0;");
+    const od = card(content, "margin:12px 16px 0;");
     cardTitle(od, "Open Position Details");
     renderOpenPositionDetails(od, openAnalytics, openFile);
-    const g1 = div(container, "display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:12px 16px 0;");
+    const g1 = div(content, "display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:12px 16px 0;");
     const eq = card(g1);
     addExpandBtn(eq, "Equity Curve", (c) => renderEquity(c, stats.equity_curve, 900));
     cardTitle(eq, "Equity Curve");
@@ -3321,33 +3326,33 @@ function renderDashboard(container, stats, trades, openRows, openAnalytics, even
     addExpandBtn(dd, "Drawdown", (c) => renderDrawdown(c, stats.drawdown_curve, 900));
     cardTitle(dd, "Drawdown");
     renderDrawdown(dd, stats.drawdown_curve);
-    const g2 = div(container, "display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:12px 16px 0;");
+    const g2 = div(content, "display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:12px 16px 0;");
     const mb = card(g2);
     cardTitle(mb, "Monthly P&L");
     renderMonthlyBars(mb, stats.monthly_pnl, trades, onShowTrades);
     const sk = card(g2);
     cardTitle(sk, "Win/Loss Streak");
     renderStreak(sk, stats.streak, trades, onShowTrades);
-    const lw = card(container, "margin:12px 16px 0;");
+    const lw = card(content, "margin:12px 16px 0;");
     cardTitle(lw, "Largest Win & Loss");
     renderLargest(lw, stats, openFile);
-    const cal = card(container, "margin:12px 16px 0;overflow-x:auto;");
+    const cal = card(content, "margin:12px 16px 0;overflow-x:auto;");
     cardTitle(cal, "P&L Calendar");
     renderCalendar(cal, stats.daily_pnl, stats.weekly_pnl, trades, openFile, onShowTrades);
-    const g3 = div(container, "display:grid;grid-template-columns:3fr 2fr;gap:12px;padding:12px 16px 0;");
+    const g3 = div(content, "display:grid;grid-template-columns:3fr 2fr;gap:12px;padding:12px 16px 0;");
     const ts = card(g3);
     cardTitle(ts, "Entry Time Performance (13:00\u201322:00, 30min)");
     renderTimeSlots(ts, stats.pnl_by_slot);
     const dr = card(g3);
     cardTitle(dr, "Trade Duration");
     renderDuration(dr, stats.duration_by_outcome);
-    const st = card(container, "margin:12px 16px 0;");
+    const st = card(content, "margin:12px 16px 0;");
     cardTitle(st, "Strategy Breakdown");
     renderStrategyTable(st, stats, trades, onShowTrades);
-    const gr = card(container, "margin:12px 16px 0;");
+    const gr = card(content, "margin:12px 16px 0;");
     cardTitle(gr, "Grade Breakdown");
     renderGrades(gr, stats, trades, onShowTrades);
-    const mc = card(container, "margin:12px 16px 16px;");
+    const mc = card(content, "margin:12px 16px 16px;");
     addExpandBtn(mc, "Market Conditions vs P&L", (c) => renderCorrelation(c, stats.market_correlation, 900));
     cardTitle(mc, "Market Conditions vs P&L");
     renderCorrelation(mc, stats.market_correlation);
@@ -3416,7 +3421,7 @@ var DashboardView = class extends import_obsidian4.ItemView {
       const seq = ++this.renderSeq;
       const container = this.containerEl.children[1];
       container.empty();
-      container.style.cssText = "padding:0;overflow-y:auto;height:100%;";
+      container.style.cssText = "padding:0;overflow:hidden;height:100%;";
       const allTrades = this.cache.getTrades();
       const openRows = this.cache.getOpenRows();
       const events = this.cache.getAccountEvents();

@@ -63,7 +63,7 @@ class DashboardView extends ItemView {
     const seq = ++this.renderSeq;
     const container = this.containerEl.children[1] as HTMLElement;
     container.empty();
-    container.style.cssText = "padding:0;overflow-y:auto;height:100%;";
+    container.style.cssText = "padding:0;overflow:hidden;height:100%;";
 
     const allTrades = this.cache.getTrades();
     const openRows  = this.cache.getOpenRows();
