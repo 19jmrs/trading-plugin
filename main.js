@@ -849,6 +849,7 @@ function calcStats(trades, accountEvents, filters) {
 var import_obsidian3 = require("obsidian");
 var JOURNAL_FOLDER2 = "Master/Journal";
 var MARKET_DATA_FILE2 = "Market Data.md";
+var PRICE_CACHE_FILE = ".trading-price-cache.json";
 var JOURNAL_DATE_RE = /(\d{4}-\d{2}-\d{2})/;
 var MARKET_MONITOR_HEADING = /^##\s+Market Monitor\s*$/i;
 var ADV_DEC_HEADING = /^##\s+Advance\/Decline\s*$/i;
@@ -863,6 +864,15 @@ function isTableLine2(line) {
 }
 function normalizeHeader(header) {
   return header.toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+function getGrade2(score) {
+  if (score >= 40)
+    return "A";
+  if (score >= 30)
+    return "B";
+  if (score >= 15)
+    return "C";
+  return "D";
 }
 function todayIso() {
   const now = new Date();
@@ -1181,6 +1191,36 @@ function fetchCloses(symbol, interval, period1, period2) {
     return closes.filter((value) => typeof value === "number" && Number.isFinite(value));
   });
 }
+function fetchLatestClose(symbol) {
+  return __async(this, null, function* () {
+    var _a, _b, _c, _d, _e, _f;
+    const nowSec = Math.floor(Date.now() / 1e3);
+    const period1 = nowSec - 20 * 24 * 60 * 60;
+    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?period1=${period1}&period2=${nowSec}&interval=1d&includePrePost=false&events=div%2Csplits`;
+    const res = yield (0, import_obsidian3.requestUrl)({
+      url,
+      method: "GET",
+      headers: {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json"
+      }
+    });
+    const result = (_c = (_b = (_a = res.json) == null ? void 0 : _a.chart) == null ? void 0 : _b.result) == null ? void 0 : _c[0];
+    const timestamps = result == null ? void 0 : result.timestamp;
+    const closes = (_f = (_e = (_d = result == null ? void 0 : result.indicators) == null ? void 0 : _d.quote) == null ? void 0 : _e[0]) == null ? void 0 : _f.close;
+    if (!Array.isArray(timestamps) || !Array.isArray(closes))
+      throw new Error(`Yahoo Finance returned no latest close for ${symbol}`);
+    for (let i = closes.length - 1; i >= 0; i--) {
+      const close = closes[i];
+      const ts = timestamps[i];
+      if (typeof close === "number" && Number.isFinite(close) && typeof ts === "number") {
+        const dt = new Date(ts * 1e3).toISOString().slice(0, 10);
+        return { symbol, close, asOf: dt, fetchedAt: new Date().toISOString() };
+      }
+    }
+    throw new Error(`Yahoo Finance returned no numeric close for ${symbol}`);
+  });
+}
 function fetchQqqeSignalsForDate(noteDateIso) {
   return __async(this, null, function* () {
     const [y, m, d] = noteDateIso.split("-").map(Number);
@@ -1205,9 +1245,182 @@ function fetchQqqeSignalsForDate(noteDateIso) {
     };
   });
 }
+function tradePassesFilters(row, filters) {
+  var _a;
+  if (filters.date_from && row.dateIso < filters.date_from)
+    return false;
+  if (filters.date_to && row.dateIso > filters.date_to)
+    return false;
+  if (filters.account && row.account !== filters.account)
+    return false;
+  if (filters.strategy && row.strategy !== filters.strategy)
+    return false;
+  if (filters.dir && row.dir !== filters.dir)
+    return false;
+  if (filters.symbol && ((_a = row.symbol) != null ? _a : "").toUpperCase() !== filters.symbol.toUpperCase())
+    return false;
+  if (filters.grade && row.grade !== filters.grade)
+    return false;
+  return true;
+}
 var MarketMonitorService = class {
   constructor(plugin) {
     this.plugin = plugin;
+  }
+  readPriceCache() {
+    return __async(this, null, function* () {
+      var _a;
+      try {
+        const exists = yield this.plugin.app.vault.adapter.exists(PRICE_CACHE_FILE);
+        if (!exists)
+          return { prices: {} };
+        const raw = yield this.plugin.app.vault.adapter.read(PRICE_CACHE_FILE);
+        const parsed = JSON.parse(raw);
+        return { prices: (_a = parsed == null ? void 0 : parsed.prices) != null ? _a : {} };
+      } catch (e) {
+        return { prices: {} };
+      }
+    });
+  }
+  savePriceCache(cache) {
+    return __async(this, null, function* () {
+      yield this.plugin.app.vault.adapter.write(PRICE_CACHE_FILE, JSON.stringify(cache, null, 2));
+    });
+  }
+  isPriceFresh(info) {
+    if (!info)
+      return false;
+    const fetchedMs = new Date(info.fetchedAt).getTime();
+    return Number.isFinite(fetchedMs) && Date.now() - fetchedMs < 6 * 60 * 60 * 1e3;
+  }
+  getLatestCloses(symbols) {
+    return __async(this, null, function* () {
+      const uniqueSymbols = [...new Set(symbols.filter(Boolean).map((s) => s.toUpperCase()))];
+      const cache = yield this.readPriceCache();
+      const result = {};
+      for (const symbol of uniqueSymbols) {
+        const cached = cache.prices[symbol];
+        if (this.isPriceFresh(cached)) {
+          result[symbol] = cached;
+          continue;
+        }
+        try {
+          const latest = yield fetchLatestClose(symbol);
+          cache.prices[symbol] = latest;
+          result[symbol] = latest;
+        } catch (e) {
+          if (cached)
+            result[symbol] = cached;
+          console.error(`Trading Journal: failed to fetch latest close for ${symbol}`, e);
+        }
+      }
+      yield this.savePriceCache(cache);
+      return result;
+    });
+  }
+  computeTractionSignal(noteDateIso) {
+    return __async(this, null, function* () {
+      var _a, _b, _c, _d;
+      const cacheManager = this.plugin.cache;
+      const trades = (_b = (_a = cacheManager == null ? void 0 : cacheManager.getTrades) == null ? void 0 : _a.call(cacheManager)) != null ? _b : [];
+      const openRows = (_d = (_c = cacheManager == null ? void 0 : cacheManager.getOpenRows) == null ? void 0 : _c.call(cacheManager)) != null ? _d : [];
+      const baseIds = /* @__PURE__ */ new Set([
+        ...trades.filter((t) => t.entry_date < noteDateIso).map((t) => t.trade_id.replace(/#\d+$/, "")),
+        ...openRows.filter((r) => r.date < noteDateIso).map((r) => r.trade_id)
+      ]);
+      const ranked = [...baseIds].map((baseId) => {
+        var _a2, _b2, _c2, _d2;
+        const related = trades.filter((t) => t.trade_id.replace(/#\d+$/, "") === baseId && t.entry_date < noteDateIso);
+        const lastExit = related.length ? [...related].sort((a, b) => `${b.exit_date} ${b.exit_time}`.localeCompare(`${a.exit_date} ${a.exit_time}`))[0] : null;
+        const entryDate = (_d2 = (_c2 = (_a2 = related[0]) == null ? void 0 : _a2.entry_date) != null ? _c2 : (_b2 = openRows.find((r) => r.trade_id === baseId)) == null ? void 0 : _b2.date) != null ? _d2 : "";
+        const sortKey = lastExit ? `${lastExit.exit_date} ${lastExit.exit_time}` : `${entryDate} 00:00`;
+        return { baseId, sortKey };
+      }).sort((a, b) => b.sortKey.localeCompare(a.sortKey)).slice(0, 5);
+      const relevantOpenRows = openRows.filter((r) => ranked.some((x) => x.baseId === r.trade_id));
+      const analytics = yield this.getOpenPositionAnalytics(trades, relevantOpenRows, 0, {});
+      const openMap = new Map(analytics.positions.map((p) => [p.baseId, p]));
+      const totalR = ranked.reduce((sum, item) => {
+        var _a2, _b2;
+        const related = trades.filter((t) => t.trade_id.replace(/#\d+$/, "") === item.baseId);
+        if (openMap.has(item.baseId))
+          return sum + ((_b2 = (_a2 = openMap.get(item.baseId)) == null ? void 0 : _a2.totalR) != null ? _b2 : 0);
+        const total = related.reduce((acc, t) => acc + t.r_multiple, 0);
+        return sum + total;
+      }, 0);
+      return totalR > 0 ? "true" : "false";
+    });
+  }
+  getOpenPositionAnalytics(_0, _1, _2) {
+    return __async(this, arguments, function* (trades, openRows, currentBalance, filters = {}) {
+      const openByBase = /* @__PURE__ */ new Map();
+      openRows.forEach((r) => openByBase.set(r.trade_id, r));
+      const relevant = [...openByBase.values()].filter((r) => {
+        var _a;
+        return tradePassesFilters({
+          dateIso: r.date,
+          account: r.account,
+          strategy: r.strategy,
+          dir: r.dir,
+          symbol: r.symbol,
+          grade: getGrade2((_a = r.trade_score) != null ? _a : 0)
+        }, filters);
+      });
+      const latest = yield this.getLatestCloses(relevant.map((r) => r.symbol));
+      const positions = relevant.map((r) => {
+        var _a, _b, _c, _d, _e, _f, _g, _h;
+        const baseId = r.trade_id;
+        const related = trades.filter((t) => t.trade_id.replace(/#\d+$/, "") === baseId);
+        const entrySize = (_b = (_a = related[0]) == null ? void 0 : _a.entry_size) != null ? _b : r.size;
+        const riskAmount = Math.abs((r.price - ((_c = r.target_sl) != null ? _c : 0)) * entrySize);
+        const realizedPnl = related.reduce((sum, t) => sum + t.pnl, 0);
+        const latestClose = latest[r.symbol.toUpperCase()];
+        const currentPrice = (_d = latestClose == null ? void 0 : latestClose.close) != null ? _d : r.price;
+        const unrealizedPnl = r.dir === "short" ? (r.price - currentPrice) * r.size : (currentPrice - r.price) * r.size;
+        const fullCost = r.price * entrySize || 1;
+        const stopRiskRemaining = r.target_sl ? Math.abs((currentPrice - r.target_sl) * r.size) : 0;
+        return {
+          baseId,
+          symbol: r.symbol,
+          dir: (_e = r.dir) != null ? _e : "long",
+          account: r.account,
+          strategy: (_f = r.strategy) != null ? _f : "",
+          grade: getGrade2((_g = r.trade_score) != null ? _g : 0),
+          entryDate: r.date,
+          entryFile: r.filePath,
+          entryPrice: r.price,
+          entrySize,
+          remainingSize: r.size,
+          targetSl: (_h = r.target_sl) != null ? _h : 0,
+          openingValue: r.price * r.size,
+          currentValue: currentPrice * r.size,
+          realizedPnl: parseFloat(realizedPnl.toFixed(2)),
+          unrealizedPnl: parseFloat(unrealizedPnl.toFixed(2)),
+          realizedPct: parseFloat((realizedPnl / fullCost * 100).toFixed(2)),
+          unrealizedPct: parseFloat((unrealizedPnl / fullCost * 100).toFixed(2)),
+          realizedR: riskAmount > 0 ? parseFloat((realizedPnl / riskAmount).toFixed(2)) : 0,
+          unrealizedR: riskAmount > 0 ? parseFloat((unrealizedPnl / riskAmount).toFixed(2)) : 0,
+          totalR: riskAmount > 0 ? parseFloat(((realizedPnl + unrealizedPnl) / riskAmount).toFixed(2)) : 0,
+          latestClose
+        };
+      });
+      const totalUnrealizedPnl = positions.reduce((sum, p) => sum + p.unrealizedPnl, 0);
+      const totalUnrealizedR = positions.reduce((sum, p) => sum + p.unrealizedR, 0);
+      const totalOpenRiskToStop = positions.reduce((sum, p) => {
+        var _a, _b;
+        return sum + Math.abs((((_b = (_a = p.latestClose) == null ? void 0 : _a.close) != null ? _b : p.entryPrice) - p.targetSl) * p.remainingSize);
+      }, 0);
+      const grossExposure = positions.reduce((sum, p) => sum + p.currentValue, 0);
+      return {
+        positions,
+        totalUnrealizedPnl: parseFloat(totalUnrealizedPnl.toFixed(2)),
+        totalUnrealizedR: parseFloat(totalUnrealizedR.toFixed(2)),
+        totalOpenRiskToStop: parseFloat(totalOpenRiskToStop.toFixed(2)),
+        grossExposure: parseFloat(grossExposure.toFixed(2)),
+        cashValue: parseFloat(Math.max(0, currentBalance - grossExposure).toFixed(2)),
+        netPnlWithUnrealized: 0,
+        balanceWithUnrealized: parseFloat((currentBalance + totalUnrealizedPnl).toFixed(2))
+      };
+    });
   }
   syncForCreatedFile(file) {
     return __async(this, null, function* () {
@@ -1285,11 +1498,18 @@ var MarketMonitorService = class {
       } catch (e) {
         console.error("Trading Journal: failed to fetch QQQE signals", e);
       }
+      let traction = "false";
+      try {
+        traction = yield this.computeTractionSignal(noteDate);
+      } catch (e) {
+        console.error("Trading Journal: failed to compute traction", e);
+      }
       yield this.plugin.app.fileManager.processFrontMatter(file, (frontmatter) => {
         var _a;
         frontmatter["4up_down"] = previousMonitorRow.up4 > previousMonitorRow.down4 ? "true" : "false";
         frontmatter["5d_ratio"] = previousMonitorRow.ratio5 !== null && previousMonitorRow.ratio5 >= 1 ? "true" : "false";
         frontmatter["high_lows"] = (_a = previousHighLowRow == null ? void 0 : previousHighLowRow.signal) != null ? _a : "false";
+        frontmatter["traction"] = traction;
         if (qqqeSignals.qqqe_ema1020 !== void 0)
           frontmatter["qqqe_ema1020"] = qqqeSignals.qqqe_ema1020 ? "true" : "false";
         if (qqqeSignals.qqqe_ema5 !== void 0)
@@ -2119,9 +2339,13 @@ function renderTradesList(parent, trades, openFile) {
     { label: "Close", key: "exit_date" },
     { label: "Entry" },
     { label: "Avg Exit" },
+    { label: "Shares", key: "filled_size" },
     { label: "Net P&L", key: "pnl" },
     { label: "ROI", key: "pnl_pct" },
     { label: "R", key: "r_multiple" },
+    { label: "Trade P&L", key: "trade_total_pnl" },
+    { label: "Trade ROI", key: "trade_total_pnl_pct" },
+    { label: "Trade R", key: "trade_total_r" },
     { label: "Side" },
     { label: "Strategy", key: "strategy" },
     { label: "Grade", key: "grade" },
@@ -2154,19 +2378,48 @@ function renderTradesList(parent, trades, openFile) {
       }
     });
   };
+  const aggregateByBase = /* @__PURE__ */ new Map();
+  trades.forEach((t) => {
+    var _a;
+    const baseId = t.trade_id.replace(/#\d+$/, "");
+    const cur = (_a = aggregateByBase.get(baseId)) != null ? _a : { pnl: 0, filled: 0, exitCount: 0, entryPrice: t.entry_price, entrySize: t.entry_size, targetSl: t.target_sl };
+    cur.pnl += t.pnl;
+    cur.filled += t.filled_size;
+    cur.exitCount = Math.max(cur.exitCount, t.exit_count);
+    aggregateByBase.set(baseId, cur);
+  });
+  const getTradeTotals = (t) => {
+    var _a, _b, _c;
+    const baseId = t.trade_id.replace(/#\d+$/, "");
+    const agg = aggregateByBase.get(baseId);
+    const totalPnl = (_a = agg == null ? void 0 : agg.pnl) != null ? _a : t.pnl;
+    const totalPnlPct = agg && agg.entryPrice * agg.entrySize > 0 ? totalPnl / (agg.entryPrice * agg.entrySize) * 100 : 0;
+    const riskPerUnit = Math.abs(((_b = agg == null ? void 0 : agg.entryPrice) != null ? _b : t.entry_price) - ((_c = agg == null ? void 0 : agg.targetSl) != null ? _c : t.target_sl));
+    const totalR = agg && riskPerUnit > 0 && agg.entrySize > 0 ? totalPnl / (riskPerUnit * agg.entrySize) : 0;
+    return { totalPnl, totalPnlPct, totalR };
+  };
   const getSortVal = (t, k) => {
+    const totals = getTradeTotals(t);
     if (k === "entry_date")
       return t.entry_date;
     if (k === "exit_date")
       return t.exit_date;
     if (k === "symbol")
       return t.symbol;
+    if (k === "filled_size")
+      return t.filled_size;
     if (k === "pnl")
       return t.pnl;
     if (k === "pnl_pct")
       return t.pnl_pct;
     if (k === "r_multiple")
       return t.r_multiple;
+    if (k === "trade_total_pnl")
+      return totals.totalPnl;
+    if (k === "trade_total_pnl_pct")
+      return totals.totalPnlPct;
+    if (k === "trade_total_r")
+      return totals.totalR;
     if (k === "strategy")
       return t.strategy || "";
     if (k === "grade")
@@ -2184,6 +2437,7 @@ function renderTradesList(parent, trades, openFile) {
     });
     const gC = { A: C.green, B: C.blue, C: C.yellow, D: C.red };
     sorted.forEach((t) => {
+      const totals = getTradeTotals(t);
       const tr = tbody.createEl("tr", { attr: { style: `border-bottom:1px solid ${C.border};cursor:pointer;` } });
       tr.addEventListener("mouseenter", () => tr.style.background = "rgba(255,255,255,0.02)");
       tr.addEventListener("mouseleave", () => tr.style.background = "");
@@ -2198,9 +2452,13 @@ function renderTradesList(parent, trades, openFile) {
         { v: t.exit_date, c: C.muted },
         { v: `$${t.entry_price}`, c: C.text },
         { v: `$${t.exit_price}`, c: C.text },
+        { v: String(t.filled_size), c: C.text },
         { v: fmtUSD(t.pnl), c: pc(t.pnl), bold: true },
         { v: `${fmt(t.pnl_pct, 2)}%`, c: pc(t.pnl) },
         { v: `${t.r_multiple}R`, c: pc(t.r_multiple) },
+        { v: fmtUSD(totals.totalPnl), c: pc(totals.totalPnl), bold: true },
+        { v: `${fmt(totals.totalPnlPct, 2)}%`, c: pc(totals.totalPnl) },
+        { v: `${fmt(totals.totalR, 2)}R`, c: pc(totals.totalR) },
         { v: t.dir.toUpperCase(), c: t.dir === "long" ? C.blue : C.orange },
         { v: t.strategy || "\u2014", c: C.muted },
         { v: t.grade, c: gC[t.grade] },
@@ -2235,11 +2493,12 @@ function uniqueTradeDirStats(trades) {
     total
   };
 }
-function renderStatsBar(parent, stats, trades, onShowTrades, openFile) {
+function renderStatsBar(parent, stats, trades, openAnalytics, onShowTrades, openFile) {
   const wrap = div(parent, `display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px;padding:12px 16px;`);
   const dirStats = uniqueTradeDirStats(trades);
   const items = [
     { label: "Net P&L", value: fmtUSD(stats.net_pnl), color: pc(stats.net_pnl) },
+    { label: "Net+Unreal", value: fmtUSD(stats.net_pnl + openAnalytics.totalUnrealizedPnl), color: pc(stats.net_pnl + openAnalytics.totalUnrealizedPnl) },
     { label: "Win Rate", value: `${stats.win_rate}%`, color: stats.win_rate >= 50 ? C.green : C.red },
     { label: "Profit Factor", value: stats.profit_factor === Infinity ? "\u221E" : String(stats.profit_factor), color: stats.profit_factor >= 1 ? C.green : C.red },
     { label: "Day Win %", value: `${stats.day_win_rate}%`, color: stats.day_win_rate >= 50 ? C.green : C.red },
@@ -2255,8 +2514,11 @@ function renderStatsBar(parent, stats, trades, onShowTrades, openFile) {
     { label: "Max DD", value: `${stats.max_drawdown_pct.toFixed(1)}%`, color: C.red },
     { label: "ROI", value: `${stats.overall_roi}%`, color: pc(stats.overall_roi) },
     { label: "Balance", value: fmtUSD(stats.current_balance), color: C.blue },
+    { label: "Bal+Unreal", value: fmtUSD(stats.current_balance + openAnalytics.totalUnrealizedPnl), color: C.blue },
     { label: "Long %", value: `${dirStats.longPct}%`, color: dirStats.longPct >= 50 ? C.green : C.text },
     { label: "Short %", value: `${dirStats.shortPct}%`, color: dirStats.shortPct >= 50 ? C.red : C.text },
+    { label: "Unrealized R", value: `${openAnalytics.totalUnrealizedR}R`, color: openAnalytics.totalUnrealizedR >= 0 ? C.green : C.red },
+    { label: "Open Risk", value: fmtUSD(openAnalytics.totalOpenRiskToStop), color: C.orange },
     { label: "Trades", value: `${stats.trade_count} (${stats.exit_count} exits)`, color: C.text, click: () => onShowTrades(trades) }
   ];
   items.forEach((item) => {
@@ -2380,11 +2642,19 @@ function metricCell(parent, label, value) {
 }
 function filterOpenRows(openRows, filters) {
   return openRows.filter((r) => {
+    var _a, _b, _c;
+    const grade = ((_a = r.trade_score) != null ? _a : 0) >= 40 ? "A" : ((_b = r.trade_score) != null ? _b : 0) >= 30 ? "B" : ((_c = r.trade_score) != null ? _c : 0) >= 15 ? "C" : "D";
+    if (filters.date_from && r.date < filters.date_from)
+      return false;
+    if (filters.date_to && r.date > filters.date_to)
+      return false;
     if (filters.account && r.account !== filters.account)
       return false;
     if (filters.strategy && r.strategy !== filters.strategy)
       return false;
     if (filters.dir && r.dir !== filters.dir)
+      return false;
+    if (filters.grade && grade !== filters.grade)
       return false;
     if (filters.symbol && r.symbol.toUpperCase() !== filters.symbol.toUpperCase())
       return false;
@@ -2408,6 +2678,38 @@ function donutPath(cx, cy, rOuter, rInner, start, end) {
     `A ${rInner} ${rInner} 0 ${large} 0 ${p4.x} ${p4.y}`,
     "Z"
   ].join(" ");
+}
+function renderOpenPositionDetails(parent, analytics, openFile) {
+  if (!analytics.positions.length) {
+    parent.createEl("div", { text: "No open positions", attr: { style: `color:${C.muted};font-size:11px;` } });
+    return;
+  }
+  const tableWrap = div(parent, "overflow:auto;border:1px solid var(--background-modifier-border);border-radius:8px;");
+  const table = tableWrap.createEl("table", { attr: { style: `width:100%;border-collapse:collapse;font-size:11px;font-family:${F};min-width:1120px;` } });
+  const thead = table.createEl("thead");
+  const tbody = table.createEl("tbody");
+  const hdr = thead.createEl("tr", { attr: { style: `background:${C.card};` } });
+  ["Symbol", "Initial Shares", "Current Shares", "Open Value", "Current Value", "Real %", "Unreal %", "Real R", "Unreal R", "Total R", "Last Close"].forEach((h) => {
+    hdr.createEl("th", { text: h, attr: { style: `padding:8px;border-bottom:1px solid ${C.border};text-align:right;color:${C.muted};font-size:10px;text-transform:uppercase;letter-spacing:0.5px;white-space:nowrap;` } });
+  });
+  analytics.positions.forEach((p) => {
+    const tr = tbody.createEl("tr", { attr: { style: `border-bottom:1px solid rgba(255,255,255,0.05);cursor:pointer;` } });
+    tr.addEventListener("click", () => openFile(p.entryFile));
+    const cells = [
+      { text: `${p.symbol} ${p.dir.toUpperCase()}`, style: `padding:8px;text-align:left;color:${C.text};font-weight:700;white-space:nowrap;` },
+      { text: fmt(p.entrySize, 0), style: `padding:8px;text-align:right;color:${C.text};` },
+      { text: fmt(p.remainingSize, 0), style: `padding:8px;text-align:right;color:${C.text};font-weight:700;` },
+      { text: fmtUSD(p.openingValue), style: `padding:8px;text-align:right;color:${C.text};` },
+      { text: fmtUSD(p.currentValue), style: `padding:8px;text-align:right;color:${C.blue};font-weight:700;` },
+      { text: `${p.realizedPct >= 0 ? "+" : ""}${fmt(p.realizedPct)}%`, style: `padding:8px;text-align:right;color:${pc(p.realizedPct)};font-weight:700;` },
+      { text: `${p.unrealizedPct >= 0 ? "+" : ""}${fmt(p.unrealizedPct)}%`, style: `padding:8px;text-align:right;color:${pc(p.unrealizedPct)};font-weight:700;` },
+      { text: `${p.realizedR}R`, style: `padding:8px;text-align:right;color:${p.realizedR >= 0 ? C.green : C.red};font-weight:700;` },
+      { text: `${p.unrealizedR}R`, style: `padding:8px;text-align:right;color:${p.unrealizedR >= 0 ? C.green : C.red};font-weight:700;` },
+      { text: `${p.totalR}R`, style: `padding:8px;text-align:right;color:${p.totalR >= 0 ? C.green : C.red};font-weight:700;` },
+      { text: p.latestClose ? `$${fmt(p.latestClose.close)}` : "\u2014", style: `padding:8px;text-align:right;color:${C.muted};` }
+    ];
+    cells.forEach((cell) => tr.createEl("td", { text: cell.text, attr: { style: cell.style } }));
+  });
 }
 function renderOpenPositionsPie(parent, openRows, balance, openFile) {
   const grouped = /* @__PURE__ */ new Map();
@@ -2917,7 +3219,7 @@ function renderMarketMonitorView(container, marketData, visibleRows, onLoadMore,
   cardTitle(chartCard, "Breadth Charts");
   renderMarketCharts(chartCard, marketData.highLowRows, marketData.advanceDeclineRows, chartFrom, chartTo, onChartRange);
 }
-function renderDashboard(container, stats, trades, openRows, events, filters, onFilterChange, openFile, marketData, state) {
+function renderDashboard(container, stats, trades, openRows, openAnalytics, events, filters, onFilterChange, openFile, marketData, state) {
   container.style.cssText = `background:${C.bg};min-height:100%;font-family:${F};color:${C.text};`;
   let tradeListData = trades;
   const redraw = () => {
@@ -3002,11 +3304,14 @@ function renderDashboard(container, stats, trades, openRows, events, filters, on
       );
       return;
     }
-    renderStatsBar(container, stats, trades, onShowTrades, openFile);
+    renderStatsBar(container, stats, trades, openAnalytics, onShowTrades, openFile);
     const filteredOpenRows = filterOpenRows(openRows, filters);
     const op = card(container, "margin:0 16px 0;");
     cardTitle(op, "Open Positions vs Cash");
     renderOpenPositionsPie(op, filteredOpenRows, stats.current_balance, openFile);
+    const od = card(container, "margin:12px 16px 0;");
+    cardTitle(od, "Open Position Details");
+    renderOpenPositionDetails(od, openAnalytics, openFile);
     const g1 = div(container, "display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:12px 16px 0;");
     const eq = card(g1);
     addExpandBtn(eq, "Equity Curve", (c) => renderEquity(c, stats.equity_curve, 900));
@@ -3117,7 +3422,10 @@ var DashboardView = class extends import_obsidian4.ItemView {
       const events = this.cache.getAccountEvents();
       const filtered = filterTrades(allTrades, this.filters);
       const stats = calcStats(allTrades, events, this.filters);
-      const marketData = yield this.marketMonitor.getDashboardData();
+      const [marketData, openAnalytics] = yield Promise.all([
+        this.marketMonitor.getDashboardData(),
+        this.marketMonitor.getOpenPositionAnalytics(allTrades, openRows, stats.current_balance, this.filters)
+      ]);
       if (seq !== this.renderSeq)
         return;
       renderDashboard(
@@ -3125,6 +3433,7 @@ var DashboardView = class extends import_obsidian4.ItemView {
         stats,
         filtered,
         openRows,
+        openAnalytics,
         events,
         this.filters,
         (f) => {
@@ -3371,6 +3680,10 @@ Summary: ${found} with score, ${missing} without`);
       });
       this.registerEvent(this.app.vault.on("create", (file) => {
         void this.marketMonitor.syncForCreatedFile(file);
+      }));
+      this.registerEvent(this.app.workspace.on("file-open", (file) => {
+        if (file)
+          void this.marketMonitor.syncForCreatedFile(file);
       }));
       this.app.workspace.onLayoutReady(() => this.openSidebar());
     });

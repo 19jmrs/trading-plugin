@@ -1,7 +1,9 @@
 import { Plugin, TAbstractFile, TFile, requestUrl } from "obsidian";
+import { Trade, TradeRow, TradeFilters, TradeGrade } from "./types";
 
 const JOURNAL_FOLDER = "Master/Journal";
 const MARKET_DATA_FILE = "Market Data.md";
+const PRICE_CACHE_FILE = ".trading-price-cache.json";
 const JOURNAL_DATE_RE = /(\d{4}-\d{2}-\d{2})/;
 
 const MARKET_MONITOR_HEADING = /^##\s+Market Monitor\s*$/i;
@@ -84,6 +86,49 @@ export interface MarketMonitorDashboardData {
   performanceTrackRows: PerformanceTrackRow[];
 }
 
+export interface LatestCloseInfo {
+  symbol: string;
+  close: number;
+  asOf: string;
+  fetchedAt: string;
+}
+
+export interface OpenPositionSnapshot {
+  baseId: string;
+  symbol: string;
+  dir: "long" | "short";
+  account: string;
+  strategy: string;
+  grade: TradeGrade;
+  entryDate: string;
+  entryFile: string;
+  entryPrice: number;
+  entrySize: number;
+  remainingSize: number;
+  targetSl: number;
+  openingValue: number;
+  currentValue: number;
+  realizedPnl: number;
+  unrealizedPnl: number;
+  realizedPct: number;
+  unrealizedPct: number;
+  realizedR: number;
+  unrealizedR: number;
+  totalR: number;
+  latestClose?: LatestCloseInfo;
+}
+
+export interface OpenPositionAnalytics {
+  positions: OpenPositionSnapshot[];
+  totalUnrealizedPnl: number;
+  totalUnrealizedR: number;
+  totalOpenRiskToStop: number;
+  grossExposure: number;
+  cashValue: number;
+  netPnlWithUnrealized: number;
+  balanceWithUnrealized: number;
+}
+
 interface QqqeSignals {
   qqqe_ema1020: boolean;
   qqqe_ema5: boolean;
@@ -107,6 +152,13 @@ function isTableLine(line: string): boolean {
 
 function normalizeHeader(header: string): string {
   return header.toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+function getGrade(score: number): TradeGrade {
+  if (score >= 40) return "A";
+  if (score >= 30) return "B";
+  if (score >= 15) return "C";
+  return "D";
 }
 
 function todayIso(): string {
@@ -422,6 +474,10 @@ function buildAdvanceDeclineRows(headers: string[], rows: string[][]): AdvanceDe
   return sortDescByDate(withIndicators);
 }
 
+interface PriceCacheFile {
+  prices: Record<string, LatestCloseInfo>;
+}
+
 async function fetchCloses(symbol: string, interval: "1d" | "1wk", period1: number, period2: number): Promise<number[]> {
   const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?period1=${period1}&period2=${period2}&interval=${interval}&includePrePost=false&events=div%2Csplits`;
   const res = await requestUrl({
@@ -438,6 +494,36 @@ async function fetchCloses(symbol: string, interval: "1d" | "1wk", period1: numb
   const closes = result?.indicators?.quote?.[0]?.close;
   if (!Array.isArray(closes)) throw new Error(`Yahoo Finance returned no closes for ${symbol} (${interval})`);
   return closes.filter((value: unknown): value is number => typeof value === "number" && Number.isFinite(value));
+}
+
+async function fetchLatestClose(symbol: string): Promise<LatestCloseInfo> {
+  const nowSec = Math.floor(Date.now() / 1000);
+  const period1 = nowSec - 20 * 24 * 60 * 60;
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?period1=${period1}&period2=${nowSec}&interval=1d&includePrePost=false&events=div%2Csplits`;
+  const res = await requestUrl({
+    url,
+    method: "GET",
+    headers: {
+      "User-Agent": "Mozilla/5.0",
+      "Accept": "application/json",
+    },
+  });
+
+  const result = res.json?.chart?.result?.[0];
+  const timestamps = result?.timestamp;
+  const closes = result?.indicators?.quote?.[0]?.close;
+  if (!Array.isArray(timestamps) || !Array.isArray(closes)) throw new Error(`Yahoo Finance returned no latest close for ${symbol}`);
+
+  for (let i = closes.length - 1; i >= 0; i--) {
+    const close = closes[i];
+    const ts = timestamps[i];
+    if (typeof close === "number" && Number.isFinite(close) && typeof ts === "number") {
+      const dt = new Date(ts * 1000).toISOString().slice(0, 10);
+      return { symbol, close, asOf: dt, fetchedAt: new Date().toISOString() };
+    }
+  }
+
+  throw new Error(`Yahoo Finance returned no numeric close for ${symbol}`);
 }
 
 async function fetchQqqeSignalsForDate(noteDateIso: string): Promise<QqqeSignals> {
@@ -466,8 +552,164 @@ async function fetchQqqeSignalsForDate(noteDateIso: string): Promise<QqqeSignals
   };
 }
 
+function tradePassesFilters(row: { dateIso: string; account?: string; strategy?: string; dir?: "long" | "short"; symbol?: string; grade?: TradeGrade }, filters: TradeFilters): boolean {
+  if (filters.date_from && row.dateIso < filters.date_from) return false;
+  if (filters.date_to && row.dateIso > filters.date_to) return false;
+  if (filters.account && row.account !== filters.account) return false;
+  if (filters.strategy && row.strategy !== filters.strategy) return false;
+  if (filters.dir && row.dir !== filters.dir) return false;
+  if (filters.symbol && (row.symbol ?? "").toUpperCase() !== filters.symbol.toUpperCase()) return false;
+  if (filters.grade && row.grade !== filters.grade) return false;
+  return true;
+}
+
 export class MarketMonitorService {
   constructor(private plugin: Plugin) {}
+
+  private async readPriceCache(): Promise<PriceCacheFile> {
+    try {
+      const exists = await this.plugin.app.vault.adapter.exists(PRICE_CACHE_FILE);
+      if (!exists) return { prices: {} };
+      const raw = await this.plugin.app.vault.adapter.read(PRICE_CACHE_FILE);
+      const parsed = JSON.parse(raw);
+      return { prices: parsed?.prices ?? {} };
+    } catch {
+      return { prices: {} };
+    }
+  }
+
+  private async savePriceCache(cache: PriceCacheFile): Promise<void> {
+    await this.plugin.app.vault.adapter.write(PRICE_CACHE_FILE, JSON.stringify(cache, null, 2));
+  }
+
+  private isPriceFresh(info: LatestCloseInfo | undefined): boolean {
+    if (!info) return false;
+    const fetchedMs = new Date(info.fetchedAt).getTime();
+    return Number.isFinite(fetchedMs) && (Date.now() - fetchedMs) < 6 * 60 * 60 * 1000;
+  }
+
+  async getLatestCloses(symbols: string[]): Promise<Record<string, LatestCloseInfo>> {
+    const uniqueSymbols = [...new Set(symbols.filter(Boolean).map(s => s.toUpperCase()))];
+    const cache = await this.readPriceCache();
+    const result: Record<string, LatestCloseInfo> = {};
+
+    for (const symbol of uniqueSymbols) {
+      const cached = cache.prices[symbol];
+      if (this.isPriceFresh(cached)) {
+        result[symbol] = cached;
+        continue;
+      }
+      try {
+        const latest = await fetchLatestClose(symbol);
+        cache.prices[symbol] = latest;
+        result[symbol] = latest;
+      } catch (e) {
+        if (cached) result[symbol] = cached;
+        console.error(`Trading Journal: failed to fetch latest close for ${symbol}`, e);
+      }
+    }
+
+    await this.savePriceCache(cache);
+    return result;
+  }
+
+  private async computeTractionSignal(noteDateIso: string): Promise<SignalString> {
+    const cacheManager = (this.plugin as any).cache;
+    const trades: Trade[] = cacheManager?.getTrades?.() ?? [];
+    const openRows: TradeRow[] = cacheManager?.getOpenRows?.() ?? [];
+
+    const baseIds = new Set<string>([
+      ...trades.filter(t => t.entry_date < noteDateIso).map(t => t.trade_id.replace(/#\d+$/, "")),
+      ...openRows.filter(r => r.date < noteDateIso).map(r => r.trade_id),
+    ]);
+
+    const ranked = [...baseIds].map(baseId => {
+      const related = trades.filter(t => t.trade_id.replace(/#\d+$/, "") === baseId && t.entry_date < noteDateIso);
+      const lastExit = related.length ? [...related].sort((a, b) => `${b.exit_date} ${b.exit_time}`.localeCompare(`${a.exit_date} ${a.exit_time}`))[0] : null;
+      const entryDate = related[0]?.entry_date ?? openRows.find(r => r.trade_id === baseId)?.date ?? "";
+      const sortKey = lastExit ? `${lastExit.exit_date} ${lastExit.exit_time}` : `${entryDate} 00:00`;
+      return { baseId, sortKey };
+    }).sort((a, b) => b.sortKey.localeCompare(a.sortKey)).slice(0, 5);
+
+    const relevantOpenRows = openRows.filter(r => ranked.some(x => x.baseId === r.trade_id));
+    const analytics = await this.getOpenPositionAnalytics(trades, relevantOpenRows, 0, {});
+    const openMap = new Map(analytics.positions.map(p => [p.baseId, p]));
+
+    const totalR = ranked.reduce((sum, item) => {
+      const related = trades.filter(t => t.trade_id.replace(/#\d+$/, "") === item.baseId);
+      if (openMap.has(item.baseId)) return sum + (openMap.get(item.baseId)?.totalR ?? 0);
+      const total = related.reduce((acc, t) => acc + t.r_multiple, 0);
+      return sum + total;
+    }, 0);
+
+    return totalR > 0 ? "true" : "false";
+  }
+
+  async getOpenPositionAnalytics(trades: Trade[], openRows: TradeRow[], currentBalance: number, filters: TradeFilters = {}): Promise<OpenPositionAnalytics> {
+    const openByBase = new Map<string, TradeRow>();
+    openRows.forEach(r => openByBase.set(r.trade_id, r));
+    const relevant = [...openByBase.values()].filter(r => tradePassesFilters({
+      dateIso: r.date,
+      account: r.account,
+      strategy: r.strategy,
+      dir: r.dir,
+      symbol: r.symbol,
+      grade: getGrade(r.trade_score ?? 0),
+    }, filters));
+
+    const latest = await this.getLatestCloses(relevant.map(r => r.symbol));
+    const positions: OpenPositionSnapshot[] = relevant.map(r => {
+      const baseId = r.trade_id;
+      const related = trades.filter(t => t.trade_id.replace(/#\d+$/, "") === baseId);
+      const entrySize = related[0]?.entry_size ?? r.size;
+      const riskAmount = Math.abs((r.price - (r.target_sl ?? 0)) * entrySize);
+      const realizedPnl = related.reduce((sum, t) => sum + t.pnl, 0);
+      const latestClose = latest[r.symbol.toUpperCase()];
+      const currentPrice = latestClose?.close ?? r.price;
+      const unrealizedPnl = r.dir === "short" ? (r.price - currentPrice) * r.size : (currentPrice - r.price) * r.size;
+      const fullCost = r.price * entrySize || 1;
+      const stopRiskRemaining = r.target_sl ? Math.abs((currentPrice - r.target_sl) * r.size) : 0;
+      return {
+        baseId,
+        symbol: r.symbol,
+        dir: r.dir ?? "long",
+        account: r.account,
+        strategy: r.strategy ?? "",
+        grade: getGrade(r.trade_score ?? 0),
+        entryDate: r.date,
+        entryFile: r.filePath,
+        entryPrice: r.price,
+        entrySize,
+        remainingSize: r.size,
+        targetSl: r.target_sl ?? 0,
+        openingValue: r.price * r.size,
+        currentValue: currentPrice * r.size,
+        realizedPnl: parseFloat(realizedPnl.toFixed(2)),
+        unrealizedPnl: parseFloat(unrealizedPnl.toFixed(2)),
+        realizedPct: parseFloat(((realizedPnl / fullCost) * 100).toFixed(2)),
+        unrealizedPct: parseFloat(((unrealizedPnl / fullCost) * 100).toFixed(2)),
+        realizedR: riskAmount > 0 ? parseFloat((realizedPnl / riskAmount).toFixed(2)) : 0,
+        unrealizedR: riskAmount > 0 ? parseFloat((unrealizedPnl / riskAmount).toFixed(2)) : 0,
+        totalR: riskAmount > 0 ? parseFloat(((realizedPnl + unrealizedPnl) / riskAmount).toFixed(2)) : 0,
+        latestClose,
+      };
+    });
+
+    const totalUnrealizedPnl = positions.reduce((sum, p) => sum + p.unrealizedPnl, 0);
+    const totalUnrealizedR = positions.reduce((sum, p) => sum + p.unrealizedR, 0);
+    const totalOpenRiskToStop = positions.reduce((sum, p) => sum + Math.abs(((p.latestClose?.close ?? p.entryPrice) - p.targetSl) * p.remainingSize), 0);
+    const grossExposure = positions.reduce((sum, p) => sum + p.currentValue, 0);
+    return {
+      positions,
+      totalUnrealizedPnl: parseFloat(totalUnrealizedPnl.toFixed(2)),
+      totalUnrealizedR: parseFloat(totalUnrealizedR.toFixed(2)),
+      totalOpenRiskToStop: parseFloat(totalOpenRiskToStop.toFixed(2)),
+      grossExposure: parseFloat(grossExposure.toFixed(2)),
+      cashValue: parseFloat(Math.max(0, currentBalance - grossExposure).toFixed(2)),
+      netPnlWithUnrealized: 0,
+      balanceWithUnrealized: parseFloat((currentBalance + totalUnrealizedPnl).toFixed(2)),
+    };
+  }
 
   async syncForCreatedFile(file: TAbstractFile): Promise<void> {
     if (!(file instanceof TFile)) return;
@@ -541,10 +783,18 @@ export class MarketMonitorService {
       console.error("Trading Journal: failed to fetch QQQE signals", e);
     }
 
+    let traction: SignalString = "false";
+    try {
+      traction = await this.computeTractionSignal(noteDate);
+    } catch (e) {
+      console.error("Trading Journal: failed to compute traction", e);
+    }
+
     await this.plugin.app.fileManager.processFrontMatter(file, frontmatter => {
       frontmatter["4up_down"] = previousMonitorRow.up4 > previousMonitorRow.down4 ? "true" : "false";
       frontmatter["5d_ratio"] = previousMonitorRow.ratio5 !== null && previousMonitorRow.ratio5 >= 1 ? "true" : "false";
       frontmatter["high_lows"] = previousHighLowRow?.signal ?? "false";
+      frontmatter["traction"] = traction;
 
       if (qqqeSignals.qqqe_ema1020 !== undefined) frontmatter["qqqe_ema1020"] = qqqeSignals.qqqe_ema1020 ? "true" : "false";
       if (qqqeSignals.qqqe_ema5 !== undefined) frontmatter["qqqe_ema5"] = qqqeSignals.qqqe_ema5 ? "true" : "false";

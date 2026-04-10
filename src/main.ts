@@ -70,10 +70,13 @@ class DashboardView extends ItemView {
     const events    = this.cache.getAccountEvents();
     const filtered  = filterTrades(allTrades, this.filters);
     const stats     = calcStats(allTrades, events, this.filters);
-    const marketData = await this.marketMonitor.getDashboardData();
+    const [marketData, openAnalytics] = await Promise.all([
+      this.marketMonitor.getDashboardData(),
+      this.marketMonitor.getOpenPositionAnalytics(allTrades, openRows, stats.current_balance, this.filters),
+    ]);
     if (seq !== this.renderSeq) return;
 
-    renderDashboard(container, stats, filtered, openRows, events, this.filters,
+    renderDashboard(container, stats, filtered, openRows, openAnalytics, events, this.filters,
       (f) => { this.filters = f; void this.render(); },
       (filePath) => this.openFile(filePath),
       marketData,
@@ -320,6 +323,9 @@ export default class TradingJournalPlugin extends Plugin {
 
     this.registerEvent(this.app.vault.on("create", file => {
       void this.marketMonitor.syncForCreatedFile(file);
+    }));
+    this.registerEvent(this.app.workspace.on("file-open", file => {
+      if (file) void this.marketMonitor.syncForCreatedFile(file);
     }));
 
     this.app.workspace.onLayoutReady(() => this.openSidebar());
