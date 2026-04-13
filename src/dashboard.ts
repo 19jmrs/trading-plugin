@@ -742,18 +742,18 @@ function renderTradesList(parent: HTMLElement, trades: Trade[], openFile:(p:stri
     { label:"Exits" },
   ];
 
-  const wrap = div(parent,"overflow-x:auto;");
-  const table=wrap.createEl("table",{attr:{style:`width:100%;border-collapse:collapse;font-size:12px;font-family:${F};`}});
+  const wrap = div(parent,"height:100%;overflow:auto;min-height:0;");
+  const table=wrap.createEl("table",{attr:{style:`width:max-content;min-width:100%;border-collapse:separate;border-spacing:0;font-size:12px;font-family:${F};`}});
   const thead=table.createEl("thead");
   const tbody=table.createEl("tbody");
 
   const renderHeader = () => {
     thead.empty();
-    const hr=thead.createEl("tr",{attr:{style:`background:var(--background-secondary);position:sticky;top:0;z-index:1;`}});
+    const hr=thead.createEl("tr",{attr:{style:`background:var(--background-secondary);`}});
     cols.forEach(col=>{
       const isActive = col.key === sortKey;
       const arrow = col.key ? (isActive ? (sortAsc ? " ↑" : " ↓") : " ↕") : "";
-      const th=hr.createEl("th",{text:col.label+arrow,attr:{style:`color:${isActive?C.blue:C.muted};text-align:left;padding:8px 10px;border-bottom:1px solid ${C.border};font-weight:700;font-size:10px;letter-spacing:1px;white-space:nowrap;${col.key?"cursor:pointer;user-select:none;":""}`}});
+      const th=hr.createEl("th",{text:col.label+arrow,attr:{style:`position:sticky;top:0;z-index:20;background:var(--background-secondary);color:${isActive?C.blue:C.muted};text-align:left;padding:8px 10px;border-bottom:1px solid ${C.border};font-weight:700;font-size:10px;letter-spacing:1px;white-space:nowrap;${col.key?"cursor:pointer;user-select:none;":""}`}});
       if(col.key){
         const k=col.key;
         th.addEventListener("click",()=>{
@@ -1654,6 +1654,7 @@ function renderMarketMonitorView(
 export function renderDashboard(
   container: HTMLElement,
   stats: TradeStats,
+  allTrades: Trade[],
   trades: Trade[],
   openRows: TradeRow[],
   openAnalytics: OpenPositionAnalytics,
@@ -1676,7 +1677,7 @@ export function renderDashboard(
     const hdr=div(container,`display:flex;align-items:center;justify-content:space-between;padding:14px 16px;border-bottom:1px solid ${C.border};background:${C.card};flex-shrink:0;position:sticky;top:0;z-index:50;`);
     hdr.createEl("div",{text:"Trading Dashboard",attr:{style:`color:${C.text};font-size:18px;font-weight:700;font-family:${F};`}});
     const hRight=div(hdr,"display:flex;align-items:center;gap:8px;flex-wrap:wrap;");
-    hRight.createEl("div",{text:`${trades.length} total trades`,attr:{style:`color:${C.muted};font-size:11px;`}});
+    hRight.createEl("div",{text:`${trades.length} filtered trades`,attr:{style:`color:${C.muted};font-size:11px;`}});
 
     const actTab=`background:rgba(96,165,250,0.15);color:${C.blue};border:1px solid ${C.blue};border-radius:6px;padding:5px 12px;font-size:11px;cursor:pointer;font-family:${F};`;
     const inTab =`background:transparent;color:${C.muted};border:1px solid ${C.border};border-radius:6px;padding:5px 12px;font-size:11px;cursor:pointer;font-family:${F};`;
@@ -1689,7 +1690,7 @@ export function renderDashboard(
 
     const onShowTrades=(t:Trade[])=>{ state.activeTab="trades"; tradeListData=t; redraw(); };
 
-    if(state.activeTab!=="market") renderFilters(container, trades, filters, (f)=>{ onFilterChange(f); });
+    if(state.activeTab!=="market") renderFilters(container, allTrades, filters, (f)=>{ onFilterChange(f); });
 
     const content = div(container, "flex:1;min-height:0;overflow-y:auto;");
 

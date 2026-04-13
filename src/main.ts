@@ -11,7 +11,7 @@ const SIDEBAR_VIEW   = "trading-journal-sidebar";
 class DashboardView extends ItemView {
   private cache:        CacheManager;
   private marketMonitor: MarketMonitorService;
-  private filters:      TradeFilters = {};
+  private filters:      TradeFilters = { account: "swings" };
   private dashboardState: DashboardRenderState = {
     activeTab: "dashboard",
     marketVisibleRows: 20,
@@ -76,7 +76,7 @@ class DashboardView extends ItemView {
     ]);
     if (seq !== this.renderSeq) return;
 
-    renderDashboard(container, stats, filtered, openRows, openAnalytics, events, this.filters,
+    renderDashboard(container, stats, allTrades, filtered, openRows, openAnalytics, events, this.filters,
       (f) => { this.filters = f; void this.render(); },
       (filePath) => this.openFile(filePath),
       marketData,

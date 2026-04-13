@@ -2353,17 +2353,17 @@ function renderTradesList(parent, trades, openFile) {
     { label: "Days", key: "hold_days" },
     { label: "Exits" }
   ];
-  const wrap = div(parent, "overflow-x:auto;");
-  const table = wrap.createEl("table", { attr: { style: `width:100%;border-collapse:collapse;font-size:12px;font-family:${F};` } });
+  const wrap = div(parent, "height:100%;overflow:auto;min-height:0;");
+  const table = wrap.createEl("table", { attr: { style: `width:max-content;min-width:100%;border-collapse:separate;border-spacing:0;font-size:12px;font-family:${F};` } });
   const thead = table.createEl("thead");
   const tbody = table.createEl("tbody");
   const renderHeader = () => {
     thead.empty();
-    const hr = thead.createEl("tr", { attr: { style: `background:var(--background-secondary);position:sticky;top:0;z-index:1;` } });
+    const hr = thead.createEl("tr", { attr: { style: `background:var(--background-secondary);` } });
     cols.forEach((col) => {
       const isActive = col.key === sortKey;
       const arrow = col.key ? isActive ? sortAsc ? " \u2191" : " \u2193" : " \u2195" : "";
-      const th = hr.createEl("th", { text: col.label + arrow, attr: { style: `color:${isActive ? C.blue : C.muted};text-align:left;padding:8px 10px;border-bottom:1px solid ${C.border};font-weight:700;font-size:10px;letter-spacing:1px;white-space:nowrap;${col.key ? "cursor:pointer;user-select:none;" : ""}` } });
+      const th = hr.createEl("th", { text: col.label + arrow, attr: { style: `position:sticky;top:0;z-index:20;background:var(--background-secondary);color:${isActive ? C.blue : C.muted};text-align:left;padding:8px 10px;border-bottom:1px solid ${C.border};font-weight:700;font-size:10px;letter-spacing:1px;white-space:nowrap;${col.key ? "cursor:pointer;user-select:none;" : ""}` } });
       if (col.key) {
         const k = col.key;
         th.addEventListener("click", () => {
@@ -3223,7 +3223,7 @@ function renderMarketMonitorView(container, marketData, visibleRows, onLoadMore,
   cardTitle(chartCard, "Breadth Charts");
   renderMarketCharts(chartCard, marketData.highLowRows, marketData.advanceDeclineRows, chartFrom, chartTo, onChartRange);
 }
-function renderDashboard(container, stats, trades, openRows, openAnalytics, events, filters, onFilterChange, openFile, marketData, state) {
+function renderDashboard(container, stats, allTrades, trades, openRows, openAnalytics, events, filters, onFilterChange, openFile, marketData, state) {
   container.style.cssText = `background:${C.bg};height:100%;display:flex;flex-direction:column;overflow:hidden;font-family:${F};color:${C.text};`;
   let tradeListData = trades;
   const redraw = () => {
@@ -3232,7 +3232,7 @@ function renderDashboard(container, stats, trades, openRows, openAnalytics, even
     const hdr = div(container, `display:flex;align-items:center;justify-content:space-between;padding:14px 16px;border-bottom:1px solid ${C.border};background:${C.card};flex-shrink:0;position:sticky;top:0;z-index:50;`);
     hdr.createEl("div", { text: "Trading Dashboard", attr: { style: `color:${C.text};font-size:18px;font-weight:700;font-family:${F};` } });
     const hRight = div(hdr, "display:flex;align-items:center;gap:8px;flex-wrap:wrap;");
-    hRight.createEl("div", { text: `${trades.length} total trades`, attr: { style: `color:${C.muted};font-size:11px;` } });
+    hRight.createEl("div", { text: `${trades.length} filtered trades`, attr: { style: `color:${C.muted};font-size:11px;` } });
     const actTab = `background:rgba(96,165,250,0.15);color:${C.blue};border:1px solid ${C.blue};border-radius:6px;padding:5px 12px;font-size:11px;cursor:pointer;font-family:${F};`;
     const inTab = `background:transparent;color:${C.muted};border:1px solid ${C.border};border-radius:6px;padding:5px 12px;font-size:11px;cursor:pointer;font-family:${F};`;
     const dashBtn = hRight.createEl("button", { text: "Dashboard", attr: { style: state.activeTab === "dashboard" ? actTab : inTab } });
@@ -3257,7 +3257,7 @@ function renderDashboard(container, stats, trades, openRows, openAnalytics, even
       redraw();
     };
     if (state.activeTab !== "market")
-      renderFilters(container, trades, filters, (f) => {
+      renderFilters(container, allTrades, filters, (f) => {
         onFilterChange(f);
       });
     const content = div(container, "flex:1;min-height:0;overflow-y:auto;");
@@ -3366,7 +3366,7 @@ var SIDEBAR_VIEW = "trading-journal-sidebar";
 var DashboardView = class extends import_obsidian4.ItemView {
   constructor(leaf, cache, marketMonitor) {
     super(leaf);
-    this.filters = {};
+    this.filters = { account: "swings" };
     this.dashboardState = {
       activeTab: "dashboard",
       marketVisibleRows: 20,
@@ -3436,6 +3436,7 @@ var DashboardView = class extends import_obsidian4.ItemView {
       renderDashboard(
         container,
         stats,
+        allTrades,
         filtered,
         openRows,
         openAnalytics,
