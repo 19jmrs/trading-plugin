@@ -1,6 +1,6 @@
 import { Plugin, WorkspaceLeaf, ItemView, Notice } from "obsidian";
 import { CacheManager } from "./cache";
-import { calcStats, filterTrades, countUniqueTrades } from "./stats";
+import { calcStats, filterTrades, filterTradesByExitDate, countUniqueTrades } from "./stats";
 import { TradeFilters } from "./types";
 import { renderDashboard, DashboardRenderState } from "./dashboard";
 import { MarketMonitorService } from "./market-monitor";
@@ -29,6 +29,7 @@ class DashboardView extends ItemView {
       return `${y}-${m}-${d}`;
     })(),
     chartDateTo: "",
+    hideMoney: false,
   };
   private unsubscribe:  (() => void) | null = null;
   private renderSeq     = 0;
@@ -69,6 +70,7 @@ class DashboardView extends ItemView {
     const openRows  = this.cache.getOpenRows();
     const events    = this.cache.getAccountEvents();
     const filtered  = filterTrades(allTrades, this.filters);
+    const realizedFiltered = filterTradesByExitDate(allTrades, this.filters);
     const stats     = calcStats(allTrades, events, this.filters);
     const [marketData, openAnalytics] = await Promise.all([
       this.marketMonitor.getDashboardData(),
@@ -76,7 +78,7 @@ class DashboardView extends ItemView {
     ]);
     if (seq !== this.renderSeq) return;
 
-    renderDashboard(container, stats, allTrades, filtered, openRows, openAnalytics, events, this.filters,
+    renderDashboard(container, stats, allTrades, filtered, realizedFiltered, openRows, openAnalytics, events, this.filters,
       (f) => { this.filters = f; void this.render(); },
       (filePath) => this.openFile(filePath),
       marketData,
@@ -94,6 +96,7 @@ class DashboardView extends ItemView {
 
 class SidebarView extends ItemView {
   private cache:       CacheManager;
+  private accountFilter = "swings";
   private unsubscribe: (() => void) | null = null;
 
   constructor(leaf: WorkspaceLeaf, cache: CacheManager) {
@@ -131,15 +134,32 @@ class SidebarView extends ItemView {
     container.empty();
     container.style.cssText = "padding:12px;min-height:100%;";
 
-    const trades  = this.cache.getTrades();
-    const events  = this.cache.getAccountEvents();
-    const stats   = calcStats(trades, events, {});
+    const allTrades = this.cache.getTrades();
+    const allOpen   = this.cache.getOpenRows();
+    const events    = this.cache.getAccountEvents();
+    const accounts  = [...new Set([...allTrades.map(t => t.account), ...allOpen.map(r => r.account), ...events.map(e => e.account)].filter(Boolean))].sort();
+    if (this.accountFilter && !accounts.includes(this.accountFilter)) this.accountFilter = accounts[0] ?? "";
+    const tradeFilters = this.accountFilter ? { account: this.accountFilter } : {};
+    const trades  = filterTrades(allTrades, tradeFilters);
+    const open    = allOpen.filter(r => !this.accountFilter || r.account === this.accountFilter);
+    const stats   = calcStats(allTrades, events, tradeFilters);
     const f       = "var(--font-interface),var(--font-text),monospace";
     const streak  = stats.streak;
 
     const wrap = container.createEl("div", { attr: { style: `font-family:${f};` } });
 
     wrap.createEl("div", { text: "Trading Summary", attr: { style: "color:var(--text-normal);font-size:13px;font-weight:700;margin-bottom:10px;border-bottom:1px solid var(--background-modifier-border);padding-bottom:8px;" } });
+
+    if (accounts.length) {
+      const filterRow = wrap.createEl("div", { attr: { style: "margin-bottom:10px;" } });
+      const sel = filterRow.createEl("select", { attr: { style: "width:100%;background:var(--background-primary);color:var(--text-normal);border:1px solid var(--background-modifier-border);border-radius:6px;padding:6px 8px;font-size:11px;" } }) as HTMLSelectElement;
+      sel.createEl("option", { text: "All Accounts", attr: { value: "" } });
+      accounts.forEach(acc => {
+        const op = sel.createEl("option", { text: acc, attr: { value: acc } });
+        if (acc === this.accountFilter) op.setAttribute("selected", "true");
+      });
+      sel.addEventListener("change", () => { this.accountFilter = sel.value; this.render(); });
+    }
 
     const uniqueDirs = new Map<string, "long" | "short">();
     trades.forEach(t => {
@@ -162,7 +182,6 @@ class SidebarView extends ItemView {
       { label:"Avg R",         value:`${stats.avg_r_multiple}R`,                 color: stats.avg_r_multiple>=0?"#4ade80":"#f87171" },
       { label:"Avg R Win",     value:`${stats.avg_r_win}R`,                      color:"#4ade80" },
       { label:"Avg R Loss",    value:`${stats.avg_r_loss}R`,                     color:"#f87171" },
-      { label:"Gain to Pain",  value:stats.gain_to_pain===Infinity?"∞":String(stats.gain_to_pain), color: stats.gain_to_pain>=1?"#4ade80":"#f87171" },
       { label:"Max DD",        value:`${stats.max_drawdown_pct.toFixed(1)}%`,    color:"#f87171" },
       { label:"ROI",           value:`${stats.overall_roi}%`,                    color: stats.overall_roi>=0?"#4ade80":"#f87171" },
       { label:"Balance",       value:`$${stats.current_balance.toFixed(2)}`,     color:"#60a5fa" },
@@ -194,7 +213,6 @@ class SidebarView extends ItemView {
     }
 
     // Open positions — openRows contain remaining size after partial exits
-    const open = this.cache.getOpenRows();
     if (open.length) {
       wrap.createEl("div", { text:`Open Positions (${open.length})`, attr:{ style:"color:#facc15;font-size:11px;font-weight:700;margin-top:12px;margin-bottom:6px;" } });
       open.forEach(r => {
@@ -257,14 +275,12 @@ export default class TradingJournalPlugin extends Plugin {
       callback: async () => { await this.cache.rebuild(msg => console.log("Trading Journal:", msg)); }
     });
     this.addCommand({
-      id:"update-market-monitor-and-frontmatter",
-      name:"Update Market Data + Daily Frontmatter",
+      id:"update-market-monitor",
+      name:"Update Market Data",
       callback: async () => {
-        const result = await this.marketMonitor.syncActiveOrTodayNote();
-        if (result.updatedFrontmatter) {
-          new Notice(`Market data synced${result.updatedMarketData ? " and Market Data.md updated" : ""}`);
-        } else if (result.updatedMarketData) {
-          new Notice(`Market Data.md updated${result.skipped ? ` — ${result.skipped}` : ""}`);
+        const result = await this.marketMonitor.updateMarketData();
+        if (result.updatedMarketData) {
+          new Notice("Market Data.md updated");
         } else {
           new Notice(result.skipped ?? "No market monitor updates were applied.");
         }
@@ -320,13 +336,6 @@ export default class TradingJournalPlugin extends Plugin {
         new Notice("Debug data dumped to console (Ctrl+Shift+I to open DevTools)");
       }
     });
-
-    this.registerEvent(this.app.vault.on("create", file => {
-      void this.marketMonitor.syncForCreatedFile(file);
-    }));
-    this.registerEvent(this.app.workspace.on("file-open", file => {
-      if (file) void this.marketMonitor.syncForCreatedFile(file);
-    }));
 
     this.app.workspace.onLayoutReady(() => this.openSidebar());
   }

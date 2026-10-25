@@ -1,6 +1,9 @@
 export type TradeType      = "entry" | "exit";
 export type TradeDirection = "long" | "short";
 export type TradeGrade     = "A" | "B" | "C" | "D";
+export type MarketConditionLabel = "Bad" | "Poor" | "Neutral" | "Good" | "Excellent";
+export type TradeStatusFilter = "open" | "closed" | "partial";
+export type HoldBucketFilter = "same-day" | "2-5d" | "1-2w" | "2w+";
 
 export interface TradeRow {
   trade_id:     string;
@@ -81,7 +84,40 @@ export interface StreakInfo {
   current_streak: number;      // positive=wins, negative=losses
   longest_win:    number;
   longest_loss:   number;
-  momentum:       "hot" | "cold" | "mixed" | "none";
+  momentum:       "hot" | "cold" | "neutral" | "none";
+}
+
+export interface WeekdayStat {
+  weekday: string;
+  net_pnl: number;
+  trade_count: number;
+  win_rate: number;
+}
+
+export interface DailyStreakStats {
+  current_green: number;
+  current_red: number;
+  longest_green: number;
+  longest_red: number;
+}
+
+export interface SetupScoreBucketStat {
+  label: string;
+  trade_count: number;
+  win_rate: number;
+  net_pnl: number;
+  avg_r: number;
+  avg_pct: number;
+}
+
+export interface MarketConditionStat {
+  label: MarketConditionLabel;
+  trade_count: number;
+  win_rate: number;
+  net_pnl: number;
+  avg_r: number;
+  avg_pct: number;
+  expectancy_r: number;
 }
 
 export interface TradeStats {
@@ -94,11 +130,21 @@ export interface TradeStats {
   profit_factor:       number;
   avg_win:             number;
   avg_loss:            number;
+  avg_win_pct:         number;
+  avg_loss_pct:        number;
+  median_win:          number;
+  median_loss:         number;
+  median_r:            number;
+  expectancy_pnl:      number;
+  expectancy_r:        number;
   avg_r_multiple:      number;
   avg_r_win:           number;
   avg_r_loss:          number;
   avg_win_loss_ratio:  number;   // avg win / avg loss
   gain_to_pain:        number;
+  total_fees:          number;
+  fees_pct_gross_profit: number;
+  avg_fees_per_trade:  number;
   largest_win:         number;
   largest_win_trade?:  Trade;
   largest_loss:        number;
@@ -114,10 +160,18 @@ export interface TradeStats {
   daily_pnl:           { date: string; pnl: number; count: number }[];
   weekly_pnl:          { week: string; pnl: number; count: number }[];
   monthly_pnl:         { month: string; pnl: number; count: number }[];
+  weekday_stats:       WeekdayStat[];
+  daily_streaks:       DailyStreakStats;
   pnl_by_slot:         { slot: string; pnl: number; winners: number; losers: number }[];
   duration_by_outcome: { bucket: string; winners: number; losers: number }[];
+  avg_hold_win_minutes: number;
+  avg_hold_loss_minutes: number;
+  median_hold_win_minutes: number;
+  median_hold_loss_minutes: number;
   pnl_by_strategy:     Record<string, StrategyStats>;
   pnl_by_grade:        Record<TradeGrade, GradeStats>;
+  setup_score_buckets: SetupScoreBucketStat[];
+  market_condition_stats: MarketConditionStat[];
   market_correlation:  { score: number; pnl: number; date: string; symbol: string }[];
 }
 
@@ -146,4 +200,8 @@ export interface TradeFilters {
   grade?:     TradeGrade;
   dir?:       TradeDirection;
   symbol?:    string;
+  market_condition?: MarketConditionLabel;
+  weekday?:   string;
+  status?:    TradeStatusFilter;
+  hold_bucket?: HoldBucketFilter;
 }

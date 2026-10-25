@@ -11,6 +11,7 @@ export interface DashboardRenderState {
   performanceDateTo: string;
   chartDateFrom: string;
   chartDateTo: string;
+  hideMoney: boolean;
 }
 
 // ─── Theme ────────────────────────────────────────────────────────────────────
@@ -30,7 +31,13 @@ const C = {
 };
 const F = "var(--font-interface),var(--font-text),monospace";
 const pc = (v: number) => v >= 0 ? C.green : C.red;
-const fmtUSD = (v: number) => { const a = Math.abs(v).toFixed(2); return v < 0 ? `-$${a}` : `$${a}`; };
+let HIDE_MONEY = false;
+const hiddenMoney = () => "••••••";
+const fmtUSD = (v: number) => {
+  if (HIDE_MONEY) return hiddenMoney();
+  const a = Math.abs(v).toFixed(2);
+  return v < 0 ? `-$${a}` : `$${a}`;
+};
 const fmt = (v: number, d = 2) => v.toFixed(d);
 
 // ─── DOM helpers ──────────────────────────────────────────────────────────────
@@ -45,6 +52,17 @@ function cardTitle(p: HTMLElement, t: string): void {
 }
 function badge(p: HTMLElement, text: string, color: string, bg: string): void {
   p.createEl("span", { text, attr: { style: `background:${bg};color:${color};padding:2px 8px;border-radius:4px;font-size:10px;font-weight:700;font-family:${F};` } });
+}
+
+function formatMinutes(totalMinutes: number): string {
+  if (!Number.isFinite(totalMinutes) || totalMinutes <= 0) return "0m";
+  const mins = Math.round(totalMinutes);
+  const days = Math.floor(mins / 1440);
+  const hours = Math.floor((mins % 1440) / 60);
+  const minutes = mins % 60;
+  if (days > 0) return `${days}d ${hours}h`;
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  return `${minutes}m`;
 }
 
 // ─── SVG helpers ──────────────────────────────────────────────────────────────
@@ -114,6 +132,39 @@ function showTooltip(tt: HTMLElement, e: MouseEvent, content: (el: HTMLElement) 
 }
 function moveTooltip(tt: HTMLElement, e: MouseEvent): void { positionTooltip(tt, e); }
 function hideTooltip(tt: HTMLElement): void { tt.style.display="none"; }
+
+function addInfoIcon(parent: HTMLElement, container: HTMLElement, info?: { what: string; formula: string; use: string }): void {
+  if (!info) return;
+  const tt = makeTooltip(container);
+  const icon = parent.createEl("span", { text: "i", attr: { style: `display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;border-radius:50%;border:1px solid ${C.border};color:${C.muted};font-size:10px;font-weight:700;cursor:help;flex-shrink:0;` } });
+  const render = (e: MouseEvent) => showTooltip(tt, e, el => {
+    el.createEl("div", { text: "What it means", attr: { style: `color:${C.blue};font-weight:700;margin-bottom:2px;` } });
+    el.createEl("div", { text: info.what, attr: { style: `margin-bottom:6px;line-height:1.4;` } });
+    el.createEl("div", { text: "Formula", attr: { style: `color:${C.blue};font-weight:700;margin-bottom:2px;` } });
+    el.createEl("div", { text: info.formula, attr: { style: `margin-bottom:6px;line-height:1.4;` } });
+    el.createEl("div", { text: "How to use it", attr: { style: `color:${C.blue};font-weight:700;margin-bottom:2px;` } });
+    el.createEl("div", { text: info.use, attr: { style: `line-height:1.4;` } });
+  });
+  icon.addEventListener("mouseenter", render);
+  icon.addEventListener("mousemove", e => { render(e); moveTooltip(tt, e); });
+  icon.addEventListener("mouseleave", () => hideTooltip(tt));
+}
+
+function renderMetricCard(
+  parent: HTMLElement,
+  label: string,
+  value: string,
+  color: string,
+  info?: { what: string; formula: string; use: string },
+  click?: () => void,
+): void {
+  const c = div(parent, `background:${C.card};border:1px solid ${C.border};border-radius:10px;padding:10px;`);
+  const top = div(c, "display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:4px;");
+  top.createEl("div", { text: label, attr: { style: `color:${C.muted};font-size:9px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;font-family:${F};` } });
+  addInfoIcon(top, c, info);
+  const valEl = c.createEl("div", { text: value, attr: { style: `color:${color};font-size:18px;font-weight:700;font-family:${F};${click?"cursor:pointer;text-decoration:underline;text-underline-offset:3px;":""}` } });
+  if (click) valEl.addEventListener("click", click);
+}
 
 // ─── Clickable trade count helper ─────────────────────────────────────────────
 function tradeCountEl(
@@ -399,6 +450,42 @@ function renderLargest(parent: HTMLElement, stats: TradeStats, openFile: (p:stri
   makeCard("Largest Loss", stats.largest_loss_trade, -(stats.largest_loss ?? 0), C.red,   "rgba(248,113,113,0.06)");
 }
 
+function renderCalendarStats(parent: HTMLElement, stats: TradeStats): void {
+  const grid = div(parent, "display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;margin-bottom:12px;");
+  stats.weekday_stats.forEach(day => {
+    metricCell(grid, `${day.weekday.slice(0,3)} P&L`, fmtUSD(day.net_pnl), {
+      what: `Realized P&L closed on ${day.weekday}.`,
+      formula: `Sum of realized P&L for trades closed on ${day.weekday}.`,
+      use: "Use this to spot strong or weak weekdays in your execution.",
+    });
+    metricCell(grid, `${day.weekday.slice(0,3)} Win %`, `${day.win_rate}%`, {
+      what: `Trade win rate for trades closed on ${day.weekday}.`,
+      formula: `Winning trades on ${day.weekday} / trades on ${day.weekday} × 100.`,
+      use: "Use this to see if certain weekdays fit your style better.",
+    });
+  });
+  metricCell(grid, "Green Day Streak", String(stats.daily_streaks.current_green), {
+    what: "Current run of consecutive green realized days.",
+    formula: "Count of most recent consecutive days where daily P&L > 0.",
+    use: "Use this to see short-term momentum in your trading days.",
+  });
+  metricCell(grid, "Red Day Streak", String(stats.daily_streaks.current_red), {
+    what: "Current run of consecutive red realized days.",
+    formula: "Count of most recent consecutive days where daily P&L < 0.",
+    use: "Use this to spot drawdown phases and slow down if needed.",
+  });
+  metricCell(grid, "Longest Green", String(stats.daily_streaks.longest_green), {
+    what: "Longest run of consecutive green realized days.",
+    formula: "Maximum consecutive days with daily P&L > 0.",
+    use: "Use this to compare your best periods with your current rhythm.",
+  });
+  metricCell(grid, "Longest Red", String(stats.daily_streaks.longest_red), {
+    what: "Longest run of consecutive red realized days.",
+    formula: "Maximum consecutive days with daily P&L < 0.",
+    use: "Use this to understand how deep rough patches tend to get.",
+  });
+}
+
 // ─── Calendar ─────────────────────────────────────────────────────────────────
 function renderCalendar(
   parent: HTMLElement,
@@ -603,6 +690,69 @@ function renderDuration(parent: HTMLElement, data: {bucket:string;winners:number
   });
 }
 
+function renderDurationSummary(parent: HTMLElement, stats: TradeStats): void {
+  const grid = div(parent, "display:grid;grid-template-columns:repeat(4,minmax(120px,1fr));gap:8px;margin-bottom:12px;");
+  metricCell(grid, "Avg Hold Win", formatMinutes(stats.avg_hold_win_minutes), {
+    what: "Average time winning fully closed trades were held.",
+    formula: "Sum of winner hold time / number of winning trades.",
+    use: "Compare this with Avg Hold Loss to see if you cut winners too early.",
+  });
+  metricCell(grid, "Avg Hold Loss", formatMinutes(stats.avg_hold_loss_minutes), {
+    what: "Average time losing fully closed trades were held.",
+    formula: "Sum of loser hold time / number of losing trades.",
+    use: "If this is much bigger than Avg Hold Win, you may be holding losers too long.",
+  });
+  metricCell(grid, "Median Hold Win", formatMinutes(stats.median_hold_win_minutes), {
+    what: "Typical hold time for winners after removing outlier distortion.",
+    formula: "Median of winner hold times.",
+    use: "Use this to see your normal winning hold pattern.",
+  });
+  metricCell(grid, "Median Hold Loss", formatMinutes(stats.median_hold_loss_minutes), {
+    what: "Typical hold time for losers after removing outlier distortion.",
+    formula: "Median of loser hold times.",
+    use: "Use this to see your normal losing hold pattern.",
+  });
+}
+
+function renderSetupScoreBuckets(parent: HTMLElement, stats: TradeStats): void {
+  const table=parent.createEl("table",{attr:{style:`width:100%;border-collapse:collapse;font-size:12px;font-family:${F};`}});
+  const thead=table.createEl("thead");
+  const tbody=table.createEl("tbody");
+  const hr=thead.createEl("tr",{attr:{style:`background:var(--background-primary);`}});
+  ["Score Bucket","Trades","Win %","Net P&L","Avg R","Avg %"].forEach(h=>hr.createEl("th",{text:h,attr:{style:`padding:8px 10px;text-align:left;color:${C.muted};border-bottom:1px solid ${C.border};font-size:10px;text-transform:uppercase;letter-spacing:1px;`}}));
+  stats.setup_score_buckets.forEach(row=>{
+    const tr=tbody.createEl("tr",{attr:{style:`border-bottom:1px solid ${C.border};`}});
+    [
+      {v:row.label,c:C.text,bold:true},
+      {v:String(row.trade_count),c:C.text},
+      {v:`${row.win_rate}%`,c:row.win_rate>=50?C.green:C.red},
+      {v:fmtUSD(row.net_pnl),c:pc(row.net_pnl),bold:true},
+      {v:`${row.avg_r}R`,c:row.avg_r>=0?C.green:C.red},
+      {v:`${row.avg_pct}%`,c:row.avg_pct>=0?C.green:C.red},
+    ].forEach(cell=>tr.createEl("td",{text:cell.v,attr:{style:`padding:8px 10px;color:${cell.c};${cell.bold?"font-weight:700;":""}`}}));
+  });
+}
+
+function renderMarketConditionBreakdown(parent: HTMLElement, stats: TradeStats): void {
+  const table=parent.createEl("table",{attr:{style:`width:100%;border-collapse:collapse;font-size:12px;font-family:${F};`}});
+  const thead=table.createEl("thead");
+  const tbody=table.createEl("tbody");
+  const hr=thead.createEl("tr",{attr:{style:`background:var(--background-primary);`}});
+  ["Condition","Trades","Win %","Net P&L","Avg R","Avg %","Exp R"].forEach(h=>hr.createEl("th",{text:h,attr:{style:`padding:8px 10px;text-align:left;color:${C.muted};border-bottom:1px solid ${C.border};font-size:10px;text-transform:uppercase;letter-spacing:1px;`}}));
+  stats.market_condition_stats.forEach(row=>{
+    const tr=tbody.createEl("tr",{attr:{style:`border-bottom:1px solid ${C.border};`}});
+    [
+      {v:row.label,c:C.text,bold:true},
+      {v:String(row.trade_count),c:C.text},
+      {v:`${row.win_rate}%`,c:row.win_rate>=50?C.green:C.red},
+      {v:fmtUSD(row.net_pnl),c:pc(row.net_pnl),bold:true},
+      {v:`${row.avg_r}R`,c:row.avg_r>=0?C.green:C.red},
+      {v:`${row.avg_pct}%`,c:row.avg_pct>=0?C.green:C.red},
+      {v:`${row.expectancy_r}R`,c:row.expectancy_r>=0?C.green:C.red},
+    ].forEach(cell=>tr.createEl("td",{text:cell.v,attr:{style:`padding:8px 10px;color:${cell.c};${cell.bold?"font-weight:700;":""}`}}));
+  });
+}
+
 // ─── Strategy table (sortable) ────────────────────────────────────────────────
 function renderStrategyTable(parent: HTMLElement, stats: TradeStats, trades: Trade[], onShowTrades:(t:Trade[])=>void): void {
   const strategies=Object.values(stats.pnl_by_strategy);
@@ -716,7 +866,7 @@ function renderCorrelation(parent: HTMLElement, data: {score:number;pnl:number;d
 function renderTradesList(parent: HTMLElement, trades: Trade[], openFile:(p:string)=>void): void {
   if(!trades.length){ parent.createEl("div",{text:"No trades for this period",attr:{style:`color:${C.muted};font-size:12px;padding:24px;text-align:center;font-family:${F};`}}); return; }
 
-  type SortKey = "entry_date"|"symbol"|"entry_size"|"filled_size"|"pnl"|"pnl_pct"|"r_multiple"|"trade_total_pnl"|"trade_total_pnl_pct"|"trade_total_r"|"exit_date"|"strategy"|"grade"|"hold_days";
+  type SortKey = "entry_date"|"symbol"|"entry_size"|"filled_size"|"pnl"|"pnl_pct"|"r_multiple"|"trade_total_pnl"|"trade_total_pnl_pct"|"trade_total_r"|"trade_total_fees"|"exit_date"|"strategy"|"grade"|"hold_days";
   let sortKey: SortKey = "entry_date";
   let sortAsc = false;
 
@@ -735,6 +885,8 @@ function renderTradesList(parent: HTMLElement, trades: Trade[], openFile:(p:stri
     { label:"Trade P&L", key:"trade_total_pnl" },
     { label:"Trade ROI", key:"trade_total_pnl_pct" },
     { label:"Trade R",   key:"trade_total_r" },
+    { label:"Trade Fees", key:"trade_total_fees" },
+    { label:"Note" },
     { label:"Side" },
     { label:"Strategy", key:"strategy" },
     { label:"Grade",    key:"grade" },
@@ -766,12 +918,13 @@ function renderTradesList(parent: HTMLElement, trades: Trade[], openFile:(p:stri
     });
   };
 
-  const aggregateByBase = new Map<string, { pnl: number; filled: number; exitCount: number; entryPrice: number; entrySize: number; targetSl: number }>();
+  const aggregateByBase = new Map<string, { pnl: number; filled: number; exitCount: number; entryPrice: number; entrySize: number; targetSl: number; fees: number }>();
   trades.forEach(t => {
     const baseId = t.trade_id.replace(/#\d+$/, "");
-    const cur = aggregateByBase.get(baseId) ?? { pnl: 0, filled: 0, exitCount: 0, entryPrice: t.entry_price, entrySize: t.entry_size, targetSl: t.target_sl };
+    const cur = aggregateByBase.get(baseId) ?? { pnl: 0, filled: 0, exitCount: 0, entryPrice: t.entry_price, entrySize: t.entry_size, targetSl: t.target_sl, fees: t.entry_fees };
     cur.pnl += t.pnl;
     cur.filled += t.filled_size;
+    cur.fees += t.exit_fees;
     cur.exitCount = Math.max(cur.exitCount, t.exit_count);
     aggregateByBase.set(baseId, cur);
   });
@@ -783,7 +936,8 @@ function renderTradesList(parent: HTMLElement, trades: Trade[], openFile:(p:stri
     const totalPnlPct = agg && agg.entryPrice * agg.entrySize > 0 ? (totalPnl / (agg.entryPrice * agg.entrySize)) * 100 : 0;
     const riskPerUnit = Math.abs((agg?.entryPrice ?? t.entry_price) - (agg?.targetSl ?? t.target_sl));
     const totalR = agg && riskPerUnit > 0 && agg.entrySize > 0 ? totalPnl / (riskPerUnit * agg.entrySize) : 0;
-    return { totalPnl, totalPnlPct, totalR };
+    const totalFees = agg?.fees ?? (t.entry_fees + t.exit_fees);
+    return { totalPnl, totalPnlPct, totalR, totalFees };
   };
 
   const getSortVal = (t: Trade, k: SortKey): any => {
@@ -799,6 +953,7 @@ function renderTradesList(parent: HTMLElement, trades: Trade[], openFile:(p:stri
     if(k==="trade_total_pnl") return totals.totalPnl;
     if(k==="trade_total_pnl_pct") return totals.totalPnlPct;
     if(k==="trade_total_r") return totals.totalR;
+    if(k==="trade_total_fees") return totals.totalFees;
     if(k==="strategy")   return t.strategy||"";
     if(k==="grade")      return t.grade;
     if(k==="hold_days")  return t.hold_days;
@@ -827,8 +982,8 @@ function renderTradesList(parent: HTMLElement, trades: Trade[], openFile:(p:stri
         {v:t.symbol,          c:C.text,bold:true},
         {v:sLabel,            c:sC,bg:sBg,pill:true},
         {v:t.exit_date,       c:C.muted},
-        {v:`$${t.entry_price}`,c:C.text},
-        {v:`$${t.exit_price}`, c:C.text},
+        {v:fmtUSD(t.entry_price),c:C.text},
+        {v:fmtUSD(t.exit_price), c:C.text},
         {v:String(t.entry_size), c:C.text},
         {v:String(t.filled_size), c:C.text},
         {v:fmtUSD(t.pnl),     c:pc(t.pnl),bold:true},
@@ -837,6 +992,8 @@ function renderTradesList(parent: HTMLElement, trades: Trade[], openFile:(p:stri
         {v:fmtUSD(totals.totalPnl), c:pc(totals.totalPnl), bold:true},
         {v:`${fmt(totals.totalPnlPct,2)}%`, c:pc(totals.totalPnl)},
         {v:`${fmt(totals.totalR,2)}R`, c:pc(totals.totalR)},
+        {v:fmtUSD(totals.totalFees), c:C.orange},
+        {v:(t.exit_note || t.entry_note || "—").slice(0, 28), c:C.muted, title:(t.exit_note || t.entry_note || "")},
         {v:t.dir.toUpperCase(),c:t.dir==="long"?C.blue:C.orange},
         {v:t.strategy||"—",   c:C.muted},
         {v:t.grade,            c:gC[t.grade]},
@@ -845,7 +1002,7 @@ function renderTradesList(parent: HTMLElement, trades: Trade[], openFile:(p:stri
       ].forEach((cell:any)=>{
         const td=tr.createEl("td",{attr:{style:`padding:9px 10px;white-space:nowrap;`}});
         if(cell.pill){ badge(td,cell.v,cell.c,cell.bg); }
-        else { td.createEl("span",{text:cell.v,attr:{style:`color:${cell.c};${cell.bold?"font-weight:700;":""}`}}); }
+        else { const span = td.createEl("span",{text:cell.v,attr:{style:`color:${cell.c};${cell.bold?"font-weight:700;":""}`}}); if(cell.title) span.setAttribute("title", cell.title); }
       });
     });
   };
@@ -875,59 +1032,74 @@ function renderStatsBar(parent: HTMLElement, stats: TradeStats, trades: Trade[],
   const wrap=div(parent,`display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px;padding:12px 16px;`);
   const dirStats = uniqueTradeDirStats(trades);
   const items=[
-    {label:"Net P&L",      value:fmtUSD(stats.net_pnl),      color:pc(stats.net_pnl)},
-    {label:"Net+Unreal",   value:fmtUSD(stats.net_pnl + openAnalytics.totalUnrealizedPnl), color:pc(stats.net_pnl + openAnalytics.totalUnrealizedPnl)},
-    {label:"Win Rate",     value:`${stats.win_rate}%`,        color:stats.win_rate>=50?C.green:C.red},
-    {label:"Profit Factor",value:stats.profit_factor===Infinity?"∞":String(stats.profit_factor), color:stats.profit_factor>=1?C.green:C.red},
-    {label:"Day Win %",    value:`${stats.day_win_rate}%`,    color:stats.day_win_rate>=50?C.green:C.red},
-    {label:"Avg Win",      value:fmtUSD(stats.avg_win),       color:C.green},
-    {label:"Avg Loss",     value:fmtUSD(stats.avg_loss),      color:C.red},
-    {label:"Largest Win",  value:fmtUSD(stats.largest_win),   color:C.green, click:()=>stats.largest_win_trade&&openFile(stats.largest_win_trade.exit_file)},
-    {label:"Largest Loss", value:fmtUSD(-stats.largest_loss), color:C.red,   click:()=>stats.largest_loss_trade&&openFile(stats.largest_loss_trade.exit_file)},
-    {label:"Avg W/L Ratio", value:String(stats.avg_win_loss_ratio), color:stats.avg_win_loss_ratio>=1?C.green:C.red, extra: stats.avg_win>0||stats.avg_loss>0 ? {win:stats.avg_win, loss:stats.avg_loss} : null},
-    {label:"Avg R",        value:`${stats.avg_r_multiple}R`,  color:stats.avg_r_multiple>=0?C.green:C.red},
-    {label:"Avg R Win",    value:`${stats.avg_r_win}R`,       color:C.green},
-    {label:"Avg R Loss",   value:`${stats.avg_r_loss}R`,      color:C.red},
-    {label:"Gain to Pain", value:stats.gain_to_pain===Infinity?"∞":String(stats.gain_to_pain), color:stats.gain_to_pain>=1?C.green:C.red},
-    {label:"Max DD",       value:`${stats.max_drawdown_pct.toFixed(1)}%`, color:C.red},
-    {label:"ROI",          value:`${stats.overall_roi}%`,     color:pc(stats.overall_roi)},
-    {label:"Balance",      value:fmtUSD(stats.current_balance),color:C.blue},
-    {label:"Bal+Unreal",   value:fmtUSD(stats.current_balance + openAnalytics.totalUnrealizedPnl),color:C.blue},
-    {label:"Long %",       value:`${dirStats.longPct}%`, color:dirStats.longPct>=50?C.green:C.text},
-    {label:"Short %",      value:`${dirStats.shortPct}%`, color:dirStats.shortPct>=50?C.red:C.text},
-    {label:"Unrealized R", value:`${openAnalytics.totalUnrealizedR}R`, color:openAnalytics.totalUnrealizedR>=0?C.green:C.red},
-    {label:"Open Risk",    value:fmtUSD(openAnalytics.totalOpenRiskToStop), color:C.orange},
-    {label:"Trades",       value:`${stats.trade_count} (${stats.exit_count} exits)`, color:C.text, click:()=>onShowTrades(trades)},
+    {label:"Net P&L", value:fmtUSD(stats.net_pnl), color:pc(stats.net_pnl), info:{what:"Total realized profit or loss closed in the selected period.", formula:"Sum of realized P&L on exit rows filtered by close date.", use:"Use this to see what you actually made or lost in the selected window."}},
+    {label:"Net+Unreal", value:fmtUSD(stats.net_pnl + openAnalytics.totalUnrealizedPnl), color:pc(stats.net_pnl + openAnalytics.totalUnrealizedPnl), info:{what:"Realized P&L plus current unrealized P&L on open positions.", formula:"Net P&L + total unrealized P&L.", use:"Use this to see the account result if open positions were marked at the latest close."}},
+    {label:"Win Rate", value:`${stats.win_rate}%`, color:stats.win_rate>=50?C.green:C.red, info:{what:"Percent of fully closed trades that finished positive.", formula:"Winning trades / fully closed trades × 100.", use:"Use this to judge hit rate, but always compare it with Avg Win, Avg Loss and Expectancy."}},
+    {label:"Profit Factor", value:stats.profit_factor===Infinity?"∞":String(stats.profit_factor), color:stats.profit_factor>=1?C.green:C.red, info:{what:"How much gross profit you make for each unit of gross loss.", formula:"Gross profit / gross loss.", use:"Above 1 means profitable. Higher is better, but sample size matters."}},
+    {label:"Expectancy $", value:fmtUSD(stats.expectancy_pnl), color:pc(stats.expectancy_pnl), info:{what:"Average dollars made or lost per fully closed trade.", formula:"Total trade P&L / number of fully closed trades.", use:"Use this to measure edge per trade in cash terms."}},
+    {label:"Expectancy R", value:`${stats.expectancy_r}R`, color:stats.expectancy_r>=0?C.green:C.red, info:{what:"Average R made or lost per fully closed trade.", formula:"Total R / number of fully closed trades.", use:"This is one of the best edge metrics because it normalizes for risk size."}},
+    {label:"Day Win %", value:`${stats.day_win_rate}%`, color:stats.day_win_rate>=50?C.green:C.red, info:{what:"Percent of realized trading days that closed green.", formula:"Green days / realized trading days × 100.", use:"Use this to see how often your days finish positive, not just individual trades."}},
+    {label:"Avg Win", value:fmtUSD(stats.avg_win), color:C.green, info:{what:"Average profit on winning fully closed trades.", formula:"Gross profit / number of winning trades.", use:"Compare this with Avg Loss to see if your winners are big enough."}},
+    {label:"Avg Loss", value:fmtUSD(stats.avg_loss), color:C.red, info:{what:"Average loss on losing fully closed trades.", formula:"Absolute gross loss / number of losing trades.", use:"Use this to see how expensive your losing trades are."}},
+    {label:"Median Win", value:fmtUSD(stats.median_win), color:C.green, info:{what:"Middle winning trade profit after sorting winners from small to large.", formula:"Median of winning trade P&L.", use:"Use this to reduce the distortion caused by one or two huge winners."}},
+    {label:"Median Loss", value:fmtUSD(-stats.median_loss), color:C.red, info:{what:"Middle losing trade size after sorting losers.", formula:"Median of losing trade P&L magnitude.", use:"Use this to see a more typical losing trade than Avg Loss."}},
+    {label:"Largest Win", value:fmtUSD(stats.largest_win), color:C.green, click:()=>stats.largest_win_trade&&openFile(stats.largest_win_trade.exit_file), info:{what:"Best fully closed trade in dollars.", formula:"Maximum aggregated trade P&L.", use:"Use this to inspect what your best trade looked like and whether it was repeatable."}},
+    {label:"Largest Loss", value:fmtUSD(-stats.largest_loss), color:C.red, click:()=>stats.largest_loss_trade&&openFile(stats.largest_loss_trade.exit_file), info:{what:"Worst fully closed trade in dollars.", formula:"Minimum aggregated trade P&L.", use:"Use this to review mistakes, bad conditions, or bad risk control."}},
+    {label:"Avg W/L Ratio", value:String(stats.avg_win_loss_ratio), color:stats.avg_win_loss_ratio>=1?C.green:C.red, info:{what:"How large the average win is compared with the average loss.", formula:"Avg Win / Avg Loss.", use:"Above 1 means your average winner is larger than your average loser."}, extra: stats.avg_win>0||stats.avg_loss>0 ? {win:stats.avg_win, loss:stats.avg_loss} : null},
+    {label:"Avg % Win", value:`${stats.avg_win_pct}%`, color:C.green, info:{what:"Average ROI of winning fully closed trades.", formula:"Average winning trade P&L %.", use:"Use this to compare winner quality independent of cash size."}},
+    {label:"Avg % Loss", value:`${stats.avg_loss_pct}%`, color:C.red, info:{what:"Average ROI of losing fully closed trades.", formula:"Average losing trade P&L %.", use:"Use this to see how hard losers hit in percentage terms."}},
+    {label:"Avg R", value:`${stats.avg_r_multiple}R`, color:stats.avg_r_multiple>=0?C.green:C.red, info:{what:"Average R multiple across fully closed trades.", formula:"Total R / fully closed trades.", use:"Use this to compare performance in risk units instead of dollars."}},
+    {label:"Median R", value:`${stats.median_r}R`, color:stats.median_r>=0?C.green:C.red, info:{what:"Middle R result after sorting fully closed trades.", formula:"Median of trade R multiples.", use:"Use this to see your typical risk-adjusted result without outliers dominating it."}},
+    {label:"Avg R Win", value:`${stats.avg_r_win}R`, color:C.green, info:{what:"Average R on winning fully closed trades.", formula:"Sum of winning R / number of winning trades.", use:"Use this to see how much reward your winners usually deliver."}},
+    {label:"Avg R Loss", value:`${stats.avg_r_loss}R`, color:C.red, info:{what:"Average R on losing fully closed trades.", formula:"Sum of losing R / number of losing trades.", use:"Use this to see if your losers stay close to plan."}},
+    {label:"Fees", value:fmtUSD(stats.total_fees), color:C.orange, info:{what:"Total commissions/fees paid by fully closed trades.", formula:"Sum of entry fees + exit fees for fully closed trades.", use:"Use this to see how much execution costs are eating into your edge."}},
+    {label:"Fees % GP", value:`${stats.fees_pct_gross_profit}%`, color:stats.fees_pct_gross_profit<=10?C.green:C.red, info:{what:"Fees as a share of gross profit.", formula:"Total fees / gross profit × 100.", use:"Use this to see whether scale-outs or overtrading are making costs too heavy."}},
+    {label:"Avg Fees", value:fmtUSD(stats.avg_fees_per_trade), color:C.orange, info:{what:"Average fees paid per fully closed trade.", formula:"Total fees / fully closed trades.", use:"Use this to compare trading cost efficiency across periods."}},
+    {label:"Max DD", value:`${stats.max_drawdown_pct.toFixed(1)}%`, color:C.red, info:{what:"Largest peak-to-trough drop in the selected realized equity curve.", formula:"Biggest equity decline from prior high, in %.", use:"Use this to understand pain level and risk of the current period."}},
+    {label:"ROI", value:`${stats.overall_roi}%`, color:pc(stats.overall_roi), info:{what:"Return from realized P&L in the selected period versus initial balance.", formula:"Net P&L / initial balance × 100.", use:"Use this as a simple percent return view for the selected period."}},
+    {label:"Balance", value:fmtUSD(stats.current_balance), color:C.blue, info:{what:"Current realized account balance for the selected account.", formula:"Initial balance + deposits - withdrawals + all realized P&L.", use:"Use this as your up-to-date realized account value."}},
+    {label:"Bal+Unreal", value:fmtUSD(stats.current_balance + openAnalytics.totalUnrealizedPnl), color:C.blue, info:{what:"Current realized balance plus unrealized P&L on open positions.", formula:"Balance + total unrealized P&L.", use:"Use this to see a marked-to-market balance snapshot."}},
+    {label:"Long %", value:`${dirStats.longPct}%`, color:dirStats.longPct>=50?C.green:C.text, info:{what:"Share of unique filtered trades that were long.", formula:"Long trades / total trades × 100.", use:"Use this to see whether your book is too biased to one side."}},
+    {label:"Short %", value:`${dirStats.shortPct}%`, color:dirStats.shortPct>=50?C.red:C.text, info:{what:"Share of unique filtered trades that were short.", formula:"Short trades / total trades × 100.", use:"Use this to see whether short exposure is helping or hurting results."}},
+    {label:"Unrealized R", value:`${openAnalytics.totalUnrealizedR}R`, color:openAnalytics.totalUnrealizedR>=0?C.green:C.red, info:{what:"Current unrealized P&L on open positions measured in R.", formula:"Sum of unrealized P&L / planned risk.", use:"Use this to see open trade performance in risk units."}},
+    {label:"Open Risk", value:fmtUSD(openAnalytics.totalOpenRiskToStop), color:C.orange, info:{what:"Distance from current prices to stops for the remaining open shares.", formula:"Sum of |current price - stop| × remaining shares.", use:"Use this to see how much open downside is still on the table if stops are hit."}},
+    {label:"Trades", value:`${stats.trade_count} (${stats.exit_count} exits)`, color:C.text, click:()=>onShowTrades(trades), info:{what:"Unique opened trades in the cohort, with exit row count in brackets.", formula:"Unique base trade IDs; bracket shows total exit records.", use:"Use this to understand sample size and how much partial exiting happened."}},
   ];
   items.forEach((item:any)=>{
-    const c=div(wrap,`background:${C.card};border:1px solid ${C.border};border-radius:10px;padding:10px;`);
-    c.createEl("div",{text:item.label,attr:{style:`color:${C.muted};font-size:9px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:4px;font-family:${F};`}});
-    const valEl=c.createEl("div",{text:item.value,attr:{style:`color:${item.color};font-size:18px;font-weight:700;font-family:${F};${item.click?"cursor:pointer;text-decoration:underline;text-underline-offset:3px;":""}`}});
-    if(item.click) valEl.addEventListener("click",item.click);
-    // Win/loss ratio bar (like Tradezella)
+    renderMetricCard(wrap, item.label, item.value, item.color, item.info, item.click);
     if(item.extra){
+      const c = wrap.lastElementChild as HTMLElement;
       const barWrap=div(c,"display:flex;align-items:center;gap:4px;margin-top:6px;");
       const total=item.extra.win+item.extra.loss;
       const winPct=total>0?(item.extra.win/total)*100:50;
       const bar=div(barWrap,`flex:1;height:6px;border-radius:3px;overflow:hidden;display:flex;`);
       div(bar,`width:${winPct}%;background:${C.green};`);
       div(bar,`flex:1;background:${C.red};`);
-      barWrap.createEl("span",{text:`$${item.extra.win.toFixed(0)}`,attr:{style:`color:${C.green};font-size:9px;font-weight:700;font-family:${F};`}});
-      barWrap.createEl("span",{text:`-$${item.extra.loss.toFixed(0)}`,attr:{style:`color:${C.red};font-size:9px;font-weight:700;font-family:${F};`}});
+      barWrap.createEl("span",{text:fmtUSD(item.extra.win),attr:{style:`color:${C.green};font-size:9px;font-weight:700;font-family:${F};`}});
+      barWrap.createEl("span",{text:fmtUSD(-item.extra.loss),attr:{style:`color:${C.red};font-size:9px;font-weight:700;font-family:${F};`}});
     }
   });
 }
 
 // ─── Filters ──────────────────────────────────────────────────────────────────
-function renderFilters(parent: HTMLElement, trades: Trade[], filters: TradeFilters, onChange:(f:TradeFilters)=>void): void {
+function renderFilters(parent: HTMLElement, trades: Trade[], openRows: TradeRow[], events: AccountEvent[], filters: TradeFilters, onChange:(f:TradeFilters)=>void): void {
   const wrap=div(parent,`display:flex;gap:6px;flex-wrap:wrap;align-items:center;padding:10px 16px;background:${C.card};border-bottom:1px solid ${C.border};`);
   const selSt=`background:var(--background-primary);color:${C.text};border:1px solid ${C.border};border-radius:6px;padding:5px 8px;font-size:11px;font-family:${F};cursor:pointer;`;
   const btnSt=`background:var(--background-primary);color:${C.muted};border:1px solid ${C.border};border-radius:6px;padding:5px 10px;font-size:11px;cursor:pointer;font-family:${F};`;
   const actSt=`background:rgba(96,165,250,0.15);color:${C.blue};border:1px solid ${C.blue};border-radius:6px;padding:5px 10px;font-size:11px;cursor:pointer;font-family:${F};`;
 
-  const strategies=[...new Set(trades.map(t=>t.strategy).filter(Boolean))];
-  const accounts  =[...new Set(trades.map(t=>t.account).filter(Boolean))];
-  const symbols   =[...new Set(trades.map(t=>t.symbol).filter(Boolean))];
+  const strategies=[...new Set([...trades.map(t=>t.strategy), ...openRows.map(r=>r.strategy)].filter(Boolean))] as string[];
+  const accounts  =[...new Set([...trades.map(t=>t.account), ...openRows.map(r=>r.account), ...events.map(e=>e.account)].filter(Boolean))] as string[];
+  const symbols   =[...new Set([...trades.map(t=>t.symbol), ...openRows.map(r=>r.symbol)].filter(Boolean))] as string[];
+  const weekdays = ["Monday","Tuesday","Wednesday","Thursday","Friday"];
+  const marketConditions = ["Bad","Poor","Neutral","Good","Excellent"];
+  const statuses = ["open","closed","partial"];
+  const holdBuckets = [
+    { label: "Same day", value: "same-day" },
+    { label: "2–5 days", value: "2-5d" },
+    { label: "1–2 weeks", value: "1-2w" },
+    { label: "2+ weeks", value: "2w+" },
+  ];
 
   const monthStartIso = () => {
     const d = new Date();
@@ -980,6 +1152,13 @@ function renderFilters(parent: HTMLElement, trades: Trade[], filters: TradeFilte
   mkSel("All Grades",    ["A","B","C","D"],filters.grade??"","grade");
   mkSel("Long/Short",    ["long","short"],  filters.dir  ??"","dir");
   mkSel("All Symbols",   symbols,    filters.symbol   ??"","symbol");
+  mkSel("All Conditions", marketConditions, filters.market_condition ?? "", "market_condition");
+  mkSel("All Weekdays", weekdays, filters.weekday ?? "", "weekday");
+  mkSel("All Status", statuses, filters.status ?? "", "status");
+  const holdSel=wrap.createEl("select",{attr:{style:selSt}}) as HTMLSelectElement;
+  holdSel.createEl("option",{text:"All Durations",attr:{value:""}});
+  holdBuckets.forEach(o=>{ const op=holdSel.createEl("option",{text:o.label,attr:{value:o.value}}); if(filters.hold_bucket===o.value) op.setAttribute("selected","true"); });
+  holdSel.addEventListener("change",()=>onChange({...filters,hold_bucket:(holdSel.value || undefined) as any}));
 
   const rebuildBtn=wrap.createEl("button",{text:"⟳ Rebuild",attr:{style:`${btnSt}margin-left:auto;`}});
   rebuildBtn.addEventListener("click",()=>{
@@ -999,10 +1178,8 @@ function rowPairStyles(left: number, right: number): [string, string] {
   return ["color:var(--text-normal);font-weight:700;", "color:var(--text-normal);font-weight:700;"];
 }
 
-function metricCell(parent: HTMLElement, label: string, value: string): void {
-  const m = card(parent, "padding:12px;");
-  m.createEl("div", { text: label, attr: { style: `color:${C.muted};font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;margin-bottom:6px;font-family:${F};` } });
-  m.createEl("div", { text: value, attr: { style: `color:${C.text};font-size:18px;font-weight:700;font-family:${F};` } });
+function metricCell(parent: HTMLElement, label: string, value: string, info?: { what: string; formula: string; use: string }): void {
+  renderMetricCard(parent, label, value, C.text, info);
 }
 
 function filterOpenRows(openRows: TradeRow[], filters: TradeFilters): TradeRow[] {
@@ -1015,6 +1192,12 @@ function filterOpenRows(openRows: TradeRow[], filters: TradeFilters): TradeRow[]
     if (filters.dir && r.dir !== filters.dir) return false;
     if (filters.grade && grade !== filters.grade) return false;
     if (filters.symbol && r.symbol.toUpperCase() !== filters.symbol.toUpperCase()) return false;
+    if (filters.weekday) {
+      const day = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"][new Date(r.date).getDay()];
+      if (day !== filters.weekday) return false;
+    }
+    // hold bucket is not applied to open rows because current open rows do not carry closed-trade hold duration
+    if (filters.status && filters.status !== "open") return false;
     return true;
   });
 }
@@ -1046,11 +1229,11 @@ function renderOpenPositionDetails(parent: HTMLElement, analytics: OpenPositionA
   }
 
   const tableWrap = div(parent, "overflow:auto;border:1px solid var(--background-modifier-border);border-radius:8px;");
-  const table = tableWrap.createEl("table", { attr: { style: `width:100%;border-collapse:collapse;font-size:11px;font-family:${F};min-width:1120px;` } });
+  const table = tableWrap.createEl("table", { attr: { style: `width:100%;border-collapse:collapse;font-size:11px;font-family:${F};min-width:1360px;` } });
   const thead = table.createEl("thead");
   const tbody = table.createEl("tbody");
   const hdr = thead.createEl("tr", { attr: { style: `background:${C.card};` } });
-  ["Symbol","Initial Shares","Current Shares","Open Value","Current Value","Real %","Unreal %","Real R","Unreal R","Total R","Last Close"].forEach(h => {
+  ["Symbol","Initial Shares","Current Shares","Open Value","Current Value","Real $","Unreal $","Real %","Unreal %","Real R","Unreal R","Total R","Last Close"].forEach(h => {
     hdr.createEl("th", { text: h, attr: { style: `padding:8px;border-bottom:1px solid ${C.border};text-align:right;color:${C.muted};font-size:10px;text-transform:uppercase;letter-spacing:0.5px;white-space:nowrap;` } });
   });
 
@@ -1063,12 +1246,14 @@ function renderOpenPositionDetails(parent: HTMLElement, analytics: OpenPositionA
       { text: fmt(p.remainingSize, 0), style: `padding:8px;text-align:right;color:${C.text};font-weight:700;` },
       { text: fmtUSD(p.openingValue), style: `padding:8px;text-align:right;color:${C.text};` },
       { text: fmtUSD(p.currentValue), style: `padding:8px;text-align:right;color:${C.blue};font-weight:700;` },
+      { text: fmtUSD(p.realizedPnl), style: `padding:8px;text-align:right;color:${pc(p.realizedPnl)};font-weight:700;` },
+      { text: fmtUSD(p.unrealizedPnl), style: `padding:8px;text-align:right;color:${pc(p.unrealizedPnl)};font-weight:700;` },
       { text: `${p.realizedPct >= 0 ? "+" : ""}${fmt(p.realizedPct)}%`, style: `padding:8px;text-align:right;color:${pc(p.realizedPct)};font-weight:700;` },
       { text: `${p.unrealizedPct >= 0 ? "+" : ""}${fmt(p.unrealizedPct)}%`, style: `padding:8px;text-align:right;color:${pc(p.unrealizedPct)};font-weight:700;` },
       { text: `${p.realizedR}R`, style: `padding:8px;text-align:right;color:${p.realizedR >= 0 ? C.green : C.red};font-weight:700;` },
       { text: `${p.unrealizedR}R`, style: `padding:8px;text-align:right;color:${p.unrealizedR >= 0 ? C.green : C.red};font-weight:700;` },
       { text: `${p.totalR}R`, style: `padding:8px;text-align:right;color:${p.totalR >= 0 ? C.green : C.red};font-weight:700;` },
-      { text: p.latestClose ? `$${fmt(p.latestClose.close)}` : "—", style: `padding:8px;text-align:right;color:${C.muted};` },
+      { text: p.latestClose ? fmtUSD(p.latestClose.close) : "—", style: `padding:8px;text-align:right;color:${C.muted};` },
     ];
     cells.forEach(cell => tr.createEl("td", { text: cell.text, attr: { style: cell.style } }));
   });
@@ -1656,6 +1841,7 @@ export function renderDashboard(
   stats: TradeStats,
   allTrades: Trade[],
   trades: Trade[],
+  realizedTrades: Trade[],
   openRows: TradeRow[],
   openAnalytics: OpenPositionAnalytics,
   events: AccountEvent[],
@@ -1665,11 +1851,13 @@ export function renderDashboard(
   marketData: MarketMonitorDashboardData | null,
   state: DashboardRenderState
 ): void {
+  HIDE_MONEY = state.hideMoney;
   container.style.cssText=`background:${C.bg};height:100%;display:flex;flex-direction:column;overflow:hidden;font-family:${F};color:${C.text};`;
 
   let tradeListData: Trade[] = trades;
 
   const redraw=()=>{
+    HIDE_MONEY = state.hideMoney;
     container.empty();
     container.style.cssText=`background:${C.bg};height:100%;display:flex;flex-direction:column;overflow:hidden;font-family:${F};color:${C.text};`;
 
@@ -1684,13 +1872,15 @@ export function renderDashboard(
     const dashBtn  =hRight.createEl("button",{text:"Dashboard",attr:{style:state.activeTab==="dashboard"?actTab:inTab}});
     const tradesBtn=hRight.createEl("button",{text:"Trades",attr:{style:state.activeTab==="trades"?actTab:inTab}});
     const marketBtn=hRight.createEl("button",{text:"Market Monitor",attr:{style:state.activeTab==="market"?actTab:inTab}});
+    const moneyBtn =hRight.createEl("button",{text:state.hideMoney?"Show $":"Hide $",attr:{style:state.hideMoney?actTab:inTab}});
     dashBtn.addEventListener("click",()=>{ state.activeTab="dashboard"; redraw(); });
     tradesBtn.addEventListener("click",()=>{ state.activeTab="trades"; tradeListData=trades; redraw(); });
     marketBtn.addEventListener("click",()=>{ state.activeTab="market"; redraw(); });
+    moneyBtn.addEventListener("click",()=>{ state.hideMoney=!state.hideMoney; redraw(); });
 
     const onShowTrades=(t:Trade[])=>{ state.activeTab="trades"; tradeListData=t; redraw(); };
 
-    if(state.activeTab!=="market") renderFilters(container, allTrades, filters, (f)=>{ onFilterChange(f); });
+    if(state.activeTab!=="market") renderFilters(container, allTrades, openRows, events, filters, (f)=>{ onFilterChange(f); });
 
     const content = div(container, "flex:1;min-height:0;overflow-y:auto;");
 
@@ -1743,8 +1933,8 @@ export function renderDashboard(
 
     // Row 2: Monthly bars + Streak
     const g2=div(content,"display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:12px 16px 0;");
-    const mb=card(g2); cardTitle(mb,"Monthly P&L");       renderMonthlyBars(mb,stats.monthly_pnl,trades,onShowTrades);
-    const sk=card(g2); cardTitle(sk,"Win/Loss Streak");   renderStreak(sk,stats.streak,trades,onShowTrades);
+    const mb=card(g2); cardTitle(mb,"Monthly P&L");       renderMonthlyBars(mb,stats.monthly_pnl,realizedTrades,onShowTrades);
+    const sk=card(g2); cardTitle(sk,"Win/Loss Streak");   renderStreak(sk,stats.streak,realizedTrades,onShowTrades);
 
     // Largest win/loss
     const lw=card(content,"margin:12px 16px 0;");
@@ -1754,12 +1944,13 @@ export function renderDashboard(
     // Calendar
     const cal=card(content,"margin:12px 16px 0;overflow-x:auto;");
     cardTitle(cal,"P&L Calendar");
-    renderCalendar(cal,stats.daily_pnl,stats.weekly_pnl,trades,openFile,onShowTrades);
+    renderCalendarStats(cal, stats);
+    renderCalendar(cal,stats.daily_pnl,stats.weekly_pnl,realizedTrades,openFile,onShowTrades);
 
     // Row 3: Time slots + Duration
     const g3=div(content,"display:grid;grid-template-columns:3fr 2fr;gap:12px;padding:12px 16px 0;");
     const ts=card(g3); cardTitle(ts,"Entry Time Performance (13:00–22:00, 30min)"); renderTimeSlots(ts,stats.pnl_by_slot);
-    const dr=card(g3); cardTitle(dr,"Trade Duration");                               renderDuration(dr,stats.duration_by_outcome);
+    const dr=card(g3); cardTitle(dr,"Trade Duration"); renderDurationSummary(dr, stats); renderDuration(dr,stats.duration_by_outcome);
 
     // Strategy table
     const st=card(content,"margin:12px 16px 0;");
@@ -1770,6 +1961,14 @@ export function renderDashboard(
     const gr=card(content,"margin:12px 16px 0;");
     cardTitle(gr,"Grade Breakdown");
     renderGrades(gr,stats,trades,onShowTrades);
+
+    const sb=card(content,"margin:12px 16px 0;");
+    cardTitle(sb,"Setup Score Buckets");
+    renderSetupScoreBuckets(sb, stats);
+
+    const mcb=card(content,"margin:12px 16px 0;");
+    cardTitle(mcb,"Market Condition Breakdown");
+    renderMarketConditionBreakdown(mcb, stats);
 
     // Market correlation
     const mc=card(content,"margin:12px 16px 16px;");

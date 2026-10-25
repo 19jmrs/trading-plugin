@@ -509,24 +509,84 @@ function countUniqueTrades(trades) {
   const ids = new Set(trades.map((t) => t.trade_id.replace(/#\d+$/, "")));
   return ids.size;
 }
+function marketConditionLabel(score) {
+  if (score === void 0 || score === null || !Number.isFinite(score))
+    return null;
+  if (score <= 20)
+    return "Bad";
+  if (score <= 45)
+    return "Poor";
+  if (score <= 60)
+    return "Neutral";
+  if (score <= 80)
+    return "Good";
+  return "Excellent";
+}
+function weekdayName(dateStr) {
+  return ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"][localDate(dateStr).getDay()];
+}
+function matchesHoldBucket(minutes, bucket) {
+  if (!bucket)
+    return true;
+  if (bucket === "same-day")
+    return minutes < 24 * 60;
+  if (bucket === "2-5d")
+    return minutes >= 24 * 60 && minutes < 6 * 24 * 60;
+  if (bucket === "1-2w")
+    return minutes >= 6 * 24 * 60 && minutes < 15 * 24 * 60;
+  return minutes >= 15 * 24 * 60;
+}
+function computeOpenBaseIds(trades) {
+  const latestByBase = /* @__PURE__ */ new Map();
+  trades.forEach((t) => latestByBase.set(t.trade_id.replace(/#\d+$/, ""), t));
+  return new Set([...latestByBase.entries()].filter(([, t]) => t.is_partial).map(([id]) => id));
+}
+function matchesStatus(t, openBaseIds, status) {
+  if (!status)
+    return true;
+  const baseId = t.trade_id.replace(/#\d+$/, "");
+  if (status === "open")
+    return openBaseIds.has(baseId);
+  if (status === "partial")
+    return t.is_partial && !openBaseIds.has(baseId);
+  return !t.is_partial && !openBaseIds.has(baseId);
+}
+function tradePassesNonDateFilters(t, f, dateMode, openBaseIds) {
+  if (f.account && t.account !== f.account)
+    return false;
+  if (f.strategy && t.strategy !== f.strategy)
+    return false;
+  if (f.grade && t.grade !== f.grade)
+    return false;
+  if (f.dir && t.dir !== f.dir)
+    return false;
+  if (f.symbol && t.symbol.toUpperCase() !== f.symbol.toUpperCase())
+    return false;
+  if (f.market_condition && marketConditionLabel(t.market_score) !== f.market_condition)
+    return false;
+  const weekdayDate = dateMode === "entry" ? t.entry_date : t.exit_date;
+  if (f.weekday && weekdayName(weekdayDate) !== f.weekday)
+    return false;
+  if (!matchesHoldBucket(t.hold_minutes, f.hold_bucket))
+    return false;
+  if (!matchesStatus(t, openBaseIds, f.status))
+    return false;
+  return true;
+}
 function filterTrades(trades, f) {
+  const openBaseIds = computeOpenBaseIds(trades);
   return trades.filter((t) => {
-    if (f.date_from && t.entry_date < f.date_from)
+    if (!tradePassesNonDateFilters(t, f, "exit", openBaseIds))
       return false;
-    if (f.date_to && t.entry_date > f.date_to)
+    if (f.date_from && t.exit_date < f.date_from)
       return false;
-    if (f.account && t.account !== f.account)
-      return false;
-    if (f.strategy && t.strategy !== f.strategy)
-      return false;
-    if (f.grade && t.grade !== f.grade)
-      return false;
-    if (f.dir && t.dir !== f.dir)
-      return false;
-    if (f.symbol && t.symbol.toUpperCase() !== f.symbol.toUpperCase())
+    if (f.date_to && t.exit_date > f.date_to)
       return false;
     return true;
   });
+}
+function filterTradesByExitDate(trades, f) {
+  return filterTrades(trades, f);
 }
 function aggregateFullTrades(trades) {
   const byId = {};
@@ -551,7 +611,11 @@ function aggregateFullTrades(trades) {
       pnl: parseFloat(totalPnl.toFixed(2)),
       r_multiple,
       is_winner: totalPnl > 0,
-      pnl_pct: parseFloat(pnl_pct.toFixed(4))
+      pnl_pct: parseFloat(pnl_pct.toFixed(4)),
+      hold_minutes: Math.max(...group.map((t) => t.hold_minutes)),
+      trade_score: group[0].trade_score,
+      market_score: group[0].market_score,
+      total_fees: parseFloat((group[0].entry_fees + group.reduce((s, t) => s + t.exit_fees, 0)).toFixed(2))
     });
   });
   return result;
@@ -596,7 +660,7 @@ function buildStreak(trades) {
   return { last5, current_streak: cur, longest_win: longestW, longest_loss: longestL, momentum };
 }
 function buildEquity(trades, events, account) {
-  var _a, _b;
+  var _a, _b, _c;
   const ev = account ? events.filter((e) => e.account === account) : events;
   let bal = ev.filter((e) => e.type === "initial").reduce((s, e) => s + e.amount, 0) || 1e4;
   const cf = {};
@@ -607,16 +671,21 @@ function buildEquity(trades, events, account) {
     if (e.type === "withdrawal")
       cf[e.date] = ((_b2 = cf[e.date]) != null ? _b2 : 0) - e.amount;
   });
-  const sorted = [...trades].sort((a, b) => toDateTimeMs(a.exit_date, a.exit_time) - toDateTimeMs(b.exit_date, b.exit_time));
-  const curve = [{ date: (_b = (_a = sorted[0]) == null ? void 0 : _a.entry_date) != null ? _b : "", value: bal }];
-  for (const t of sorted) {
-    if (cf[t.exit_date]) {
-      bal += cf[t.exit_date];
-      delete cf[t.exit_date];
-    }
-    bal += t.pnl;
-    curve.push({ date: t.exit_date, value: parseFloat(bal.toFixed(2)) });
-  }
+  const tradeByDate = {};
+  [...trades].sort((a, b) => toDateTimeMs(a.exit_date, a.exit_time) - toDateTimeMs(b.exit_date, b.exit_time)).forEach((t) => {
+    var _a2;
+    tradeByDate[t.exit_date] = ((_a2 = tradeByDate[t.exit_date]) != null ? _a2 : 0) + t.pnl;
+  });
+  const dates = [.../* @__PURE__ */ new Set([...Object.keys(cf), ...Object.keys(tradeByDate)])].sort((a, b) => a.localeCompare(b));
+  const startDate = (_c = (_b = dates[0]) != null ? _b : (_a = trades[0]) == null ? void 0 : _a.entry_date) != null ? _c : "";
+  const curve = [{ date: startDate, value: parseFloat(bal.toFixed(2)) }];
+  dates.forEach((date) => {
+    if (cf[date])
+      bal += cf[date];
+    if (tradeByDate[date])
+      bal += tradeByDate[date];
+    curve.push({ date, value: parseFloat(bal.toFixed(2)) });
+  });
   return curve;
 }
 function buildDrawdown(equity) {
@@ -627,6 +696,26 @@ function buildDrawdown(equity) {
       peak = p.value;
     return { date: p.date, value: parseFloat((peak > 0 ? (p.value - peak) / peak * 100 : 0).toFixed(2)) };
   });
+}
+function sliceEquityCurveByDate(equity, dateFrom, dateTo) {
+  if (!dateFrom && !dateTo)
+    return equity.filter((p) => !!p.date);
+  const filtered = equity.filter((p) => {
+    if (!p.date)
+      return false;
+    if (dateFrom && p.date < dateFrom)
+      return false;
+    if (dateTo && p.date > dateTo)
+      return false;
+    return true;
+  });
+  if (dateFrom) {
+    const prior = [...equity].reverse().find((p) => p.date && p.date < dateFrom);
+    if (prior && !filtered.some((p) => p.date === dateFrom)) {
+      filtered.unshift({ date: dateFrom, value: prior.value });
+    }
+  }
+  return filtered;
 }
 function buildDailyPnl(trades) {
   const m = {};
@@ -697,6 +786,88 @@ function buildDuration(trades) {
     return { bucket: b.label, winners: t.filter((t2) => t2.is_winner).length, losers: t.filter((t2) => !t2.is_winner).length };
   });
 }
+function median(values) {
+  if (!values.length)
+    return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+function buildWeekdayStats(trades) {
+  const order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"];
+  return order.map((day) => {
+    const rows = trades.filter((t) => weekdayName(t.exit_date) === day);
+    const wins = rows.filter((t) => t.is_winner).length;
+    return {
+      weekday: day,
+      net_pnl: parseFloat(rows.reduce((sum, t) => sum + t.pnl, 0).toFixed(2)),
+      trade_count: rows.length,
+      win_rate: rows.length ? parseFloat((wins / rows.length * 100).toFixed(1)) : 0
+    };
+  });
+}
+function buildDailyStreakStats(daily) {
+  let currentGreen = 0, currentRed = 0, longestGreen = 0, longestRed = 0, greenRun = 0, redRun = 0;
+  daily.forEach((d) => {
+    if (d.pnl > 0) {
+      greenRun += 1;
+      redRun = 0;
+      longestGreen = Math.max(longestGreen, greenRun);
+    } else if (d.pnl < 0) {
+      redRun += 1;
+      greenRun = 0;
+      longestRed = Math.max(longestRed, redRun);
+    } else {
+      greenRun = 0;
+      redRun = 0;
+    }
+  });
+  for (let i = daily.length - 1; i >= 0; i--) {
+    if (daily[i].pnl > 0 && currentRed === 0)
+      currentGreen += 1;
+    else if (daily[i].pnl < 0 && currentGreen === 0)
+      currentRed += 1;
+    else
+      break;
+  }
+  return { current_green: currentGreen, current_red: currentRed, longest_green: longestGreen, longest_red: longestRed };
+}
+function buildSetupScoreBuckets(trades) {
+  const buckets = [
+    { label: "40+", min: 40, max: Infinity },
+    { label: "30-39", min: 30, max: 40 },
+    { label: "15-29", min: 15, max: 30 },
+    { label: "<15", min: -Infinity, max: 15 }
+  ];
+  return buckets.map((bucket) => {
+    const rows = trades.filter((t) => t.trade_score >= bucket.min && t.trade_score < bucket.max);
+    const wins = rows.filter((t) => t.is_winner).length;
+    return {
+      label: bucket.label,
+      trade_count: rows.length,
+      win_rate: rows.length ? parseFloat((wins / rows.length * 100).toFixed(1)) : 0,
+      net_pnl: parseFloat(rows.reduce((sum, t) => sum + t.pnl, 0).toFixed(2)),
+      avg_r: rows.length ? parseFloat((rows.reduce((sum, t) => sum + t.r_multiple, 0) / rows.length).toFixed(2)) : 0,
+      avg_pct: rows.length ? parseFloat((rows.reduce((sum, t) => sum + t.pnl_pct, 0) / rows.length).toFixed(2)) : 0
+    };
+  });
+}
+function buildMarketConditionStats(trades) {
+  const order = ["Bad", "Poor", "Neutral", "Good", "Excellent"];
+  return order.map((label) => {
+    const rows = trades.filter((t) => marketConditionLabel(t.market_score) === label);
+    const wins = rows.filter((t) => t.is_winner).length;
+    return {
+      label,
+      trade_count: rows.length,
+      win_rate: rows.length ? parseFloat((wins / rows.length * 100).toFixed(1)) : 0,
+      net_pnl: parseFloat(rows.reduce((sum, t) => sum + t.pnl, 0).toFixed(2)),
+      avg_r: rows.length ? parseFloat((rows.reduce((sum, t) => sum + t.r_multiple, 0) / rows.length).toFixed(2)) : 0,
+      avg_pct: rows.length ? parseFloat((rows.reduce((sum, t) => sum + t.pnl_pct, 0) / rows.length).toFixed(2)) : 0,
+      expectancy_r: rows.length ? parseFloat((rows.reduce((sum, t) => sum + t.r_multiple, 0) / rows.length).toFixed(2)) : 0
+    };
+  });
+}
 function buildStrategyStats(trades) {
   const m = {};
   trades.forEach((t) => {
@@ -723,7 +894,8 @@ function buildGradeStats(trades) {
 }
 function calcStats(trades, accountEvents, filters) {
   var _a, _b, _c, _d;
-  const ft = filterTrades(trades, filters);
+  const cohortTrades = filterTrades(trades, filters);
+  const realizedTrades = cohortTrades;
   const initBal = accountEvents.filter((e) => (!filters.account || e.account === filters.account) && e.type === "initial").reduce((s, e) => s + e.amount, 0) || 1e4;
   const allEquity = buildEquity(trades.filter((t) => !filters.account || t.account === filters.account), accountEvents, filters.account);
   const currentBalance = (_b = (_a = allEquity[allEquity.length - 1]) == null ? void 0 : _a.value) != null ? _b : initBal;
@@ -738,10 +910,20 @@ function calcStats(trades, accountEvents, filters) {
     avg_win_loss_ratio: 0,
     avg_win: 0,
     avg_loss: 0,
+    avg_win_pct: 0,
+    avg_loss_pct: 0,
+    median_win: 0,
+    median_loss: 0,
+    median_r: 0,
+    expectancy_pnl: 0,
+    expectancy_r: 0,
     avg_r_multiple: 0,
     avg_r_win: 0,
     avg_r_loss: 0,
     gain_to_pain: 0,
+    total_fees: 0,
+    fees_pct_gross_profit: 0,
+    avg_fees_per_trade: 0,
     largest_win: 0,
     largest_loss: 0,
     day_win_rate: 0,
@@ -755,31 +937,40 @@ function calcStats(trades, accountEvents, filters) {
     daily_pnl: [],
     weekly_pnl: [],
     monthly_pnl: [],
+    weekday_stats: [],
+    daily_streaks: { current_green: 0, current_red: 0, longest_green: 0, longest_red: 0 },
     pnl_by_slot: [],
     duration_by_outcome: [],
+    avg_hold_win_minutes: 0,
+    avg_hold_loss_minutes: 0,
+    median_hold_win_minutes: 0,
+    median_hold_loss_minutes: 0,
     pnl_by_strategy: {},
     pnl_by_grade: buildGradeStats([]),
+    setup_score_buckets: [],
+    market_condition_stats: [],
     market_correlation: []
   });
-  if (!ft.length)
+  if (!cohortTrades.length && !realizedTrades.length)
     return empty();
-  const wins = ft.filter((t) => t.is_winner);
-  const losses = ft.filter((t) => !t.is_winner);
-  const net_pnl = parseFloat(ft.reduce((s, t) => s + t.pnl, 0).toFixed(2));
-  const daily = buildDailyPnl(ft);
+  const net_pnl = parseFloat(realizedTrades.reduce((s, t) => s + t.pnl, 0).toFixed(2));
+  const daily = buildDailyPnl(realizedTrades);
   const winDays = daily.filter((d) => d.pnl > 0).length;
-  const equity = buildEquity(ft, accountEvents, filters.account);
+  const equity = sliceEquityCurveByDate(allEquity, filters.date_from, filters.date_to);
   const dd = buildDrawdown(equity);
-  const maxDdPct = Math.abs(Math.min(...dd.map((d) => d.value)));
-  const fullTrades = aggregateFullTrades(ft);
+  const maxDdPct = dd.length ? Math.abs(Math.min(...dd.map((d) => d.value))) : 0;
+  const fullTrades = aggregateFullTrades(cohortTrades);
   const ftWins = fullTrades.filter((t) => t.is_winner);
   const ftLosses = fullTrades.filter((t) => !t.is_winner);
   const gw = ftWins.reduce((s, t) => s + t.pnl, 0);
   const gl = Math.abs(ftLosses.reduce((s, t) => s + t.pnl, 0));
-  const closedExits = ft.filter((t) => !t.is_partial);
+  const totalFees = fullTrades.reduce((sum, t) => sum + t.total_fees, 0);
+  const weekdayStats = buildWeekdayStats(realizedTrades);
+  const dailyStreaks = buildDailyStreakStats(daily);
+  const closedExits = cohortTrades.filter((t) => !t.is_partial);
   const pnlByBase = {};
   const lastExitByBase = {};
-  ft.forEach((t) => {
+  cohortTrades.forEach((t) => {
     var _a2;
     const baseId = t.trade_id.replace(/#[0-9]+$/, "");
     pnlByBase[baseId] = ((_a2 = pnlByBase[baseId]) != null ? _a2 : 0) + t.pnl;
@@ -805,52 +996,68 @@ function calcStats(trades, accountEvents, filters) {
   const largestLossPnl = worstBaseId ? (_d = pnlByBase[worstBaseId]) != null ? _d : 0 : 0;
   return {
     net_pnl,
-    trade_count: countUniqueTrades(ft),
-    exit_count: ft.length,
+    trade_count: countUniqueTrades(cohortTrades),
+    exit_count: cohortTrades.length,
     win_count: ftWins.length,
     loss_count: ftLosses.length,
     win_rate: fullTrades.length > 0 ? parseFloat((ftWins.length / fullTrades.length * 100).toFixed(1)) : 0,
     profit_factor: gl > 0 ? parseFloat((gw / gl).toFixed(2)) : gw > 0 ? Infinity : 0,
     avg_win: ftWins.length > 0 ? parseFloat((gw / ftWins.length).toFixed(2)) : 0,
     avg_loss: ftLosses.length > 0 ? parseFloat((gl / ftLosses.length).toFixed(2)) : 0,
+    avg_win_pct: ftWins.length > 0 ? parseFloat((ftWins.reduce((s, t) => s + t.pnl_pct, 0) / ftWins.length).toFixed(2)) : 0,
+    avg_loss_pct: ftLosses.length > 0 ? parseFloat((ftLosses.reduce((s, t) => s + t.pnl_pct, 0) / ftLosses.length).toFixed(2)) : 0,
+    median_win: ftWins.length > 0 ? parseFloat(median(ftWins.map((t) => t.pnl)).toFixed(2)) : 0,
+    median_loss: ftLosses.length > 0 ? parseFloat(Math.abs(median(ftLosses.map((t) => t.pnl))).toFixed(2)) : 0,
+    median_r: fullTrades.length > 0 ? parseFloat(median(fullTrades.map((t) => t.r_multiple)).toFixed(2)) : 0,
+    expectancy_pnl: fullTrades.length > 0 ? parseFloat((fullTrades.reduce((s, t) => s + t.pnl, 0) / fullTrades.length).toFixed(2)) : 0,
+    expectancy_r: fullTrades.length > 0 ? parseFloat((fullTrades.reduce((s, t) => s + t.r_multiple, 0) / fullTrades.length).toFixed(2)) : 0,
     avg_r_multiple: fullTrades.length > 0 ? parseFloat((fullTrades.reduce((s, t) => s + t.r_multiple, 0) / fullTrades.length).toFixed(2)) : 0,
     avg_r_win: ftWins.length > 0 ? parseFloat((ftWins.reduce((s, t) => s + t.r_multiple, 0) / ftWins.length).toFixed(2)) : 0,
     avg_r_loss: ftLosses.length > 0 ? parseFloat((ftLosses.reduce((s, t) => s + t.r_multiple, 0) / ftLosses.length).toFixed(2)) : 0,
     avg_win_loss_ratio: ftWins.length > 0 && ftLosses.length > 0 ? parseFloat((gw / ftWins.length / (gl / ftLosses.length)).toFixed(2)) : 0,
     gain_to_pain: gl > 0 ? parseFloat((gw / gl).toFixed(2)) : gw > 0 ? Infinity : 0,
+    total_fees: parseFloat(totalFees.toFixed(2)),
+    fees_pct_gross_profit: gw > 0 ? parseFloat((totalFees / gw * 100).toFixed(2)) : 0,
+    avg_fees_per_trade: fullTrades.length > 0 ? parseFloat((totalFees / fullTrades.length).toFixed(2)) : 0,
     largest_win: largestWinPnl > 0 ? largestWinPnl : 0,
     largest_win_trade: largestWinTrade,
     largest_loss: largestLossPnl < 0 ? Math.abs(largestLossPnl) : 0,
     largest_loss_trade: largestLossTrade,
     day_win_rate: daily.length > 0 ? parseFloat((winDays / daily.length * 100).toFixed(1)) : 0,
-    overall_roi: fullTrades.length > 0 ? parseFloat((fullTrades.reduce((s, t) => s + t.pnl, 0) / initBal * 100).toFixed(2)) : 0,
+    overall_roi: parseFloat((net_pnl / initBal * 100).toFixed(2)),
     max_drawdown: parseFloat(Math.abs(maxDdPct * initBal / 100).toFixed(2)),
     max_drawdown_pct: parseFloat(maxDdPct.toFixed(2)),
     current_balance: parseFloat(currentBalance.toFixed(2)),
-    streak: buildStreak(ft),
+    streak: buildStreak(realizedTrades),
     equity_curve: equity,
     drawdown_curve: dd,
     daily_pnl: daily,
-    weekly_pnl: buildWeeklyPnl(ft),
-    monthly_pnl: buildMonthlyPnl(ft),
+    weekly_pnl: buildWeeklyPnl(realizedTrades),
+    monthly_pnl: buildMonthlyPnl(realizedTrades),
+    weekday_stats: weekdayStats,
+    daily_streaks: dailyStreaks,
     pnl_by_slot: buildPnlBySlot(closedExits),
     // fully closed only
     duration_by_outcome: buildDuration(closedExits),
     // fully closed only
+    avg_hold_win_minutes: ftWins.length > 0 ? parseFloat((ftWins.reduce((sum, t) => sum + t.hold_minutes, 0) / ftWins.length).toFixed(2)) : 0,
+    avg_hold_loss_minutes: ftLosses.length > 0 ? parseFloat((ftLosses.reduce((sum, t) => sum + t.hold_minutes, 0) / ftLosses.length).toFixed(2)) : 0,
+    median_hold_win_minutes: ftWins.length > 0 ? parseFloat(median(ftWins.map((t) => t.hold_minutes)).toFixed(2)) : 0,
+    median_hold_loss_minutes: ftLosses.length > 0 ? parseFloat(median(ftLosses.map((t) => t.hold_minutes)).toFixed(2)) : 0,
     pnl_by_strategy: buildStrategyStats(closedExits),
     // fully closed only
     pnl_by_grade: buildGradeStats(closedExits),
     // fully closed only
-    market_correlation: closedExits.filter((t) => t.market_score !== void 0).map((t) => ({ score: t.market_score, pnl: t.pnl, date: t.entry_date, symbol: t.symbol }))
+    setup_score_buckets: buildSetupScoreBuckets(fullTrades),
+    market_condition_stats: buildMarketConditionStats(fullTrades),
+    market_correlation: closedExits.filter((t) => t.market_score !== void 0).map((t) => ({ score: t.market_score, pnl: t.pnl, date: t.exit_date, symbol: t.symbol }))
   };
 }
 
 // src/market-monitor.ts
 var import_obsidian3 = require("obsidian");
-var JOURNAL_FOLDER2 = "Master/Journal";
 var MARKET_DATA_FILE2 = "Market Data.md";
 var PRICE_CACHE_FILE = ".trading-price-cache.json";
-var JOURNAL_DATE_RE = /(\d{4}-\d{2}-\d{2})/;
 var MARKET_MONITOR_HEADING = /^##\s+Market Monitor\s*$/i;
 var ADV_DEC_HEADING = /^##\s+Advance\/Decline\s*$/i;
 var HIGH_LOW_HEADING = /^##\s+52w Highs\/Lows\s*$/i;
@@ -873,13 +1080,6 @@ function getGrade2(score) {
   if (score >= 15)
     return "C";
   return "D";
-}
-function todayIso() {
-  const now = new Date();
-  const y = now.getFullYear();
-  const m = String(now.getMonth() + 1).padStart(2, "0");
-  const d = String(now.getDate()).padStart(2, "0");
-  return `${y}-${m}-${d}`;
 }
 function formatRatio(value) {
   return value.toFixed(2);
@@ -909,15 +1109,6 @@ function formatIsoToDisplay(value) {
     return value;
   const [, yyyy, mm, dd] = m;
   return `${dd}/${mm}/${yyyy}`;
-}
-function extractJournalDate(file) {
-  var _a, _b;
-  return (_b = (_a = file.basename.match(JOURNAL_DATE_RE)) == null ? void 0 : _a[1]) != null ? _b : null;
-}
-function isWeekday(dateIso) {
-  const [y, m, d] = dateIso.split("-").map(Number);
-  const day = new Date(Date.UTC(y, m - 1, d)).getUTCDay();
-  return day >= 1 && day <= 5;
 }
 function findTableByHeading(content, headingPattern) {
   const lines = content.split("\n");
@@ -1010,10 +1201,6 @@ function emaSeries(values, period) {
     out[i] = current;
   }
   return out;
-}
-function ema(values, period) {
-  const series = emaSeries(values, period);
-  return series.length ? series[series.length - 1] : null;
 }
 function computeHighLowSignals(rows) {
   const asc = sortAscByDate(rows);
@@ -1171,26 +1358,6 @@ function buildAdvanceDeclineRows(headers, rows) {
   });
   return sortDescByDate(withIndicators);
 }
-function fetchCloses(symbol, interval, period1, period2) {
-  return __async(this, null, function* () {
-    var _a, _b, _c, _d, _e;
-    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?period1=${period1}&period2=${period2}&interval=${interval}&includePrePost=false&events=div%2Csplits`;
-    const res = yield (0, import_obsidian3.requestUrl)({
-      url,
-      method: "GET",
-      headers: {
-        "User-Agent": "Mozilla/5.0",
-        "Accept": "application/json"
-      }
-    });
-    const payload = res.json;
-    const result = (_b = (_a = payload == null ? void 0 : payload.chart) == null ? void 0 : _a.result) == null ? void 0 : _b[0];
-    const closes = (_e = (_d = (_c = result == null ? void 0 : result.indicators) == null ? void 0 : _c.quote) == null ? void 0 : _d[0]) == null ? void 0 : _e.close;
-    if (!Array.isArray(closes))
-      throw new Error(`Yahoo Finance returned no closes for ${symbol} (${interval})`);
-    return closes.filter((value) => typeof value === "number" && Number.isFinite(value));
-  });
-}
 function fetchLatestClose(symbol) {
   return __async(this, null, function* () {
     var _a, _b, _c, _d, _e, _f;
@@ -1219,30 +1386,6 @@ function fetchLatestClose(symbol) {
       }
     }
     throw new Error(`Yahoo Finance returned no numeric close for ${symbol}`);
-  });
-}
-function fetchQqqeSignalsForDate(noteDateIso) {
-  return __async(this, null, function* () {
-    const [y, m, d] = noteDateIso.split("-").map(Number);
-    const period2 = Math.floor(Date.UTC(y, m - 1, d, 0, 0, 0) / 1e3);
-    const dailyPeriod1 = period2 - 180 * 24 * 60 * 60;
-    const weeklyPeriod1 = period2 - 900 * 24 * 60 * 60;
-    const [dailyCloses, weeklyCloses] = yield Promise.all([
-      fetchCloses("QQQE", "1d", dailyPeriod1, period2),
-      fetchCloses("QQQE", "1wk", weeklyPeriod1, period2)
-    ]);
-    const dailyClose = dailyCloses[dailyCloses.length - 1];
-    const dailyEma5 = ema(dailyCloses, 5);
-    const dailyEma10 = ema(dailyCloses, 10);
-    const dailyEma20 = ema(dailyCloses, 20);
-    const weeklyClose = weeklyCloses[weeklyCloses.length - 1];
-    const weeklyEma10 = ema(weeklyCloses, 10);
-    const weeklyEma20 = ema(weeklyCloses, 20);
-    return {
-      qqqe_ema1020: Boolean(dailyEma10 !== null && dailyEma20 !== null && dailyClose > dailyEma10 && dailyClose > dailyEma20 && dailyEma10 > dailyEma20),
-      qqqe_ema5: Boolean(dailyEma5 !== null && dailyClose > dailyEma5),
-      qqqe_wema1020: Boolean(weeklyEma10 !== null && weeklyEma20 !== null && weeklyClose > weeklyEma10 && weeklyClose > weeklyEma20 && weeklyEma10 > weeklyEma20)
-    };
   });
 }
 function tradePassesFilters(row, filters) {
@@ -1318,38 +1461,6 @@ var MarketMonitorService = class {
       return result;
     });
   }
-  computeTractionSignal(noteDateIso) {
-    return __async(this, null, function* () {
-      var _a, _b, _c, _d;
-      const cacheManager = this.plugin.cache;
-      const trades = (_b = (_a = cacheManager == null ? void 0 : cacheManager.getTrades) == null ? void 0 : _a.call(cacheManager)) != null ? _b : [];
-      const openRows = (_d = (_c = cacheManager == null ? void 0 : cacheManager.getOpenRows) == null ? void 0 : _c.call(cacheManager)) != null ? _d : [];
-      const baseIds = /* @__PURE__ */ new Set([
-        ...trades.filter((t) => t.entry_date < noteDateIso).map((t) => t.trade_id.replace(/#\d+$/, "")),
-        ...openRows.filter((r) => r.date < noteDateIso).map((r) => r.trade_id)
-      ]);
-      const ranked = [...baseIds].map((baseId) => {
-        var _a2, _b2, _c2, _d2;
-        const related = trades.filter((t) => t.trade_id.replace(/#\d+$/, "") === baseId && t.entry_date < noteDateIso);
-        const lastExit = related.length ? [...related].sort((a, b) => `${b.exit_date} ${b.exit_time}`.localeCompare(`${a.exit_date} ${a.exit_time}`))[0] : null;
-        const entryDate = (_d2 = (_c2 = (_a2 = related[0]) == null ? void 0 : _a2.entry_date) != null ? _c2 : (_b2 = openRows.find((r) => r.trade_id === baseId)) == null ? void 0 : _b2.date) != null ? _d2 : "";
-        const sortKey = lastExit ? `${lastExit.exit_date} ${lastExit.exit_time}` : `${entryDate} 00:00`;
-        return { baseId, sortKey };
-      }).sort((a, b) => b.sortKey.localeCompare(a.sortKey)).slice(0, 5);
-      const relevantOpenRows = openRows.filter((r) => ranked.some((x) => x.baseId === r.trade_id));
-      const analytics = yield this.getOpenPositionAnalytics(trades, relevantOpenRows, 0, {});
-      const openMap = new Map(analytics.positions.map((p) => [p.baseId, p]));
-      const totalR = ranked.reduce((sum, item) => {
-        var _a2, _b2;
-        const related = trades.filter((t) => t.trade_id.replace(/#\d+$/, "") === item.baseId);
-        if (openMap.has(item.baseId))
-          return sum + ((_b2 = (_a2 = openMap.get(item.baseId)) == null ? void 0 : _a2.totalR) != null ? _b2 : 0);
-        const total = related.reduce((acc, t) => acc + t.r_multiple, 0);
-        return sum + total;
-      }, 0);
-      return totalR > 0 ? "true" : "false";
-    });
-  }
   getOpenPositionAnalytics(_0, _1, _2) {
     return __async(this, arguments, function* (trades, openRows, currentBalance, filters = {}) {
       const openByBase = /* @__PURE__ */ new Map();
@@ -1422,34 +1533,16 @@ var MarketMonitorService = class {
       };
     });
   }
-  syncForCreatedFile(file) {
+  updateMarketData() {
     return __async(this, null, function* () {
-      if (!(file instanceof import_obsidian3.TFile))
-        return;
-      if (!this.isEligibleJournalFile(file))
-        return;
-      try {
-        yield this.syncNote(file);
-      } catch (e) {
-        console.error("Trading Journal: market monitor auto-sync failed", e);
+      const result = yield this.updateMarketDataTable();
+      if (!result) {
+        return { updatedMarketData: false, skipped: `Could not read ${MARKET_DATA_FILE2}.` };
       }
-    });
-  }
-  syncActiveOrTodayNote() {
-    return __async(this, null, function* () {
-      const active = this.plugin.app.workspace.getActiveFile();
-      if (active instanceof import_obsidian3.TFile && this.isEligibleJournalFile(active)) {
-        return this.syncNote(active);
-      }
-      const today = todayIso();
-      const fallback = this.plugin.app.vault.getFiles().find((file) => {
-        const dateIso = extractJournalDate(file);
-        return this.isEligibleJournalFile(file) && dateIso === today;
-      });
-      if (!fallback) {
-        return { updatedMarketData: yield this.updateMarketDataOnly(), updatedFrontmatter: false, skipped: "No active or today's weekday daily note found." };
-      }
-      return this.syncNote(fallback);
+      return {
+        updatedMarketData: result.updated,
+        skipped: result.updated ? void 0 : "No market monitor updates were applied."
+      };
     });
   }
   getDashboardData() {
@@ -1463,68 +1556,6 @@ var MarketMonitorService = class {
         advanceDeclineRows: marketData.advanceDeclineRows,
         performanceTrackRows: marketData.performanceTrackRows
       };
-    });
-  }
-  isEligibleJournalFile(file) {
-    if (file.extension !== "md" || !file.path.startsWith(JOURNAL_FOLDER2))
-      return false;
-    const dateIso = extractJournalDate(file);
-    if (!dateIso)
-      return false;
-    if (dateIso < todayIso())
-      return false;
-    return isWeekday(dateIso);
-  }
-  syncNote(file) {
-    return __async(this, null, function* () {
-      const noteDate = extractJournalDate(file);
-      if (!noteDate)
-        return { updatedMarketData: false, updatedFrontmatter: false, skipped: "Daily note date not found in filename." };
-      if (noteDate < todayIso())
-        return { updatedMarketData: false, updatedFrontmatter: false, skipped: "Only today's and future notes are updated." };
-      if (!isWeekday(noteDate))
-        return { updatedMarketData: false, updatedFrontmatter: false, skipped: "Weekend note skipped." };
-      const marketData = yield this.updateMarketDataTable();
-      if (!marketData)
-        return { updatedMarketData: false, updatedFrontmatter: false, skipped: `Could not read ${MARKET_DATA_FILE2}.` };
-      const previousMonitorRow = marketData.monitorRows.find((row) => row.dateIso < noteDate);
-      if (!previousMonitorRow) {
-        return { updatedMarketData: marketData.updated, updatedFrontmatter: false, skipped: `No market monitor row found before ${noteDate}.` };
-      }
-      const previousHighLowRow = marketData.highLowRows.find((row) => row.dateIso < noteDate);
-      let qqqeSignals = {};
-      try {
-        qqqeSignals = yield fetchQqqeSignalsForDate(noteDate);
-      } catch (e) {
-        console.error("Trading Journal: failed to fetch QQQE signals", e);
-      }
-      let traction = "false";
-      try {
-        traction = yield this.computeTractionSignal(noteDate);
-      } catch (e) {
-        console.error("Trading Journal: failed to compute traction", e);
-      }
-      yield this.plugin.app.fileManager.processFrontMatter(file, (frontmatter) => {
-        var _a;
-        frontmatter["4up_down"] = previousMonitorRow.up4 > previousMonitorRow.down4 ? "true" : "false";
-        frontmatter["5d_ratio"] = previousMonitorRow.ratio5 !== null && previousMonitorRow.ratio5 >= 1 ? "true" : "false";
-        frontmatter["high_lows"] = (_a = previousHighLowRow == null ? void 0 : previousHighLowRow.signal) != null ? _a : "false";
-        frontmatter["traction"] = traction;
-        if (qqqeSignals.qqqe_ema1020 !== void 0)
-          frontmatter["qqqe_ema1020"] = qqqeSignals.qqqe_ema1020 ? "true" : "false";
-        if (qqqeSignals.qqqe_ema5 !== void 0)
-          frontmatter["qqqe_ema5"] = qqqeSignals.qqqe_ema5 ? "true" : "false";
-        if (qqqeSignals.qqqe_wema1020 !== void 0)
-          frontmatter["qqqe_wema1020"] = qqqeSignals.qqqe_wema1020 ? "true" : "false";
-      });
-      return { updatedMarketData: marketData.updated, updatedFrontmatter: true };
-    });
-  }
-  updateMarketDataOnly() {
-    return __async(this, null, function* () {
-      var _a;
-      const result = yield this.updateMarketDataTable();
-      return (_a = result == null ? void 0 : result.updated) != null ? _a : false;
     });
   }
   readMarketDataDocument() {
@@ -1608,7 +1639,11 @@ var C = {
 };
 var F = "var(--font-interface),var(--font-text),monospace";
 var pc = (v) => v >= 0 ? C.green : C.red;
+var HIDE_MONEY = false;
+var hiddenMoney = () => "\u2022\u2022\u2022\u2022\u2022\u2022";
 var fmtUSD = (v) => {
+  if (HIDE_MONEY)
+    return hiddenMoney();
   const a = Math.abs(v).toFixed(2);
   return v < 0 ? `-$${a}` : `$${a}`;
 };
@@ -1624,6 +1659,19 @@ function cardTitle(p, t) {
 }
 function badge(p, text, color, bg) {
   p.createEl("span", { text, attr: { style: `background:${bg};color:${color};padding:2px 8px;border-radius:4px;font-size:10px;font-weight:700;font-family:${F};` } });
+}
+function formatMinutes(totalMinutes) {
+  if (!Number.isFinite(totalMinutes) || totalMinutes <= 0)
+    return "0m";
+  const mins = Math.round(totalMinutes);
+  const days = Math.floor(mins / 1440);
+  const hours = Math.floor(mins % 1440 / 60);
+  const minutes = mins % 60;
+  if (days > 0)
+    return `${days}d ${hours}h`;
+  if (hours > 0)
+    return `${hours}h ${minutes}m`;
+  return `${minutes}m`;
 }
 var NS = "http://www.w3.org/2000/svg";
 function svg(p, w, h) {
@@ -1734,6 +1782,35 @@ function moveTooltip(tt, e) {
 }
 function hideTooltip(tt) {
   tt.style.display = "none";
+}
+function addInfoIcon(parent, container, info) {
+  if (!info)
+    return;
+  const tt = makeTooltip(container);
+  const icon = parent.createEl("span", { text: "i", attr: { style: `display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;border-radius:50%;border:1px solid ${C.border};color:${C.muted};font-size:10px;font-weight:700;cursor:help;flex-shrink:0;` } });
+  const render = (e) => showTooltip(tt, e, (el) => {
+    el.createEl("div", { text: "What it means", attr: { style: `color:${C.blue};font-weight:700;margin-bottom:2px;` } });
+    el.createEl("div", { text: info.what, attr: { style: `margin-bottom:6px;line-height:1.4;` } });
+    el.createEl("div", { text: "Formula", attr: { style: `color:${C.blue};font-weight:700;margin-bottom:2px;` } });
+    el.createEl("div", { text: info.formula, attr: { style: `margin-bottom:6px;line-height:1.4;` } });
+    el.createEl("div", { text: "How to use it", attr: { style: `color:${C.blue};font-weight:700;margin-bottom:2px;` } });
+    el.createEl("div", { text: info.use, attr: { style: `line-height:1.4;` } });
+  });
+  icon.addEventListener("mouseenter", render);
+  icon.addEventListener("mousemove", (e) => {
+    render(e);
+    moveTooltip(tt, e);
+  });
+  icon.addEventListener("mouseleave", () => hideTooltip(tt));
+}
+function renderMetricCard(parent, label, value, color, info, click) {
+  const c = div(parent, `background:${C.card};border:1px solid ${C.border};border-radius:10px;padding:10px;`);
+  const top = div(c, "display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:4px;");
+  top.createEl("div", { text: label, attr: { style: `color:${C.muted};font-size:9px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;font-family:${F};` } });
+  addInfoIcon(top, c, info);
+  const valEl = c.createEl("div", { text: value, attr: { style: `color:${color};font-size:18px;font-weight:700;font-family:${F};${click ? "cursor:pointer;text-decoration:underline;text-underline-offset:3px;" : ""}` } });
+  if (click)
+    valEl.addEventListener("click", click);
 }
 function showExpandModal(title, renderFn) {
   const overlay = document.body.createEl("div", { attr: { style: `
@@ -2020,6 +2097,41 @@ function renderLargest(parent, stats, openFile) {
   makeCard("Largest Win", stats.largest_win_trade, stats.largest_win, C.green, "rgba(74,222,128,0.06)");
   makeCard("Largest Loss", stats.largest_loss_trade, -((_a = stats.largest_loss) != null ? _a : 0), C.red, "rgba(248,113,113,0.06)");
 }
+function renderCalendarStats(parent, stats) {
+  const grid = div(parent, "display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;margin-bottom:12px;");
+  stats.weekday_stats.forEach((day) => {
+    metricCell(grid, `${day.weekday.slice(0, 3)} P&L`, fmtUSD(day.net_pnl), {
+      what: `Realized P&L closed on ${day.weekday}.`,
+      formula: `Sum of realized P&L for trades closed on ${day.weekday}.`,
+      use: "Use this to spot strong or weak weekdays in your execution."
+    });
+    metricCell(grid, `${day.weekday.slice(0, 3)} Win %`, `${day.win_rate}%`, {
+      what: `Trade win rate for trades closed on ${day.weekday}.`,
+      formula: `Winning trades on ${day.weekday} / trades on ${day.weekday} \xD7 100.`,
+      use: "Use this to see if certain weekdays fit your style better."
+    });
+  });
+  metricCell(grid, "Green Day Streak", String(stats.daily_streaks.current_green), {
+    what: "Current run of consecutive green realized days.",
+    formula: "Count of most recent consecutive days where daily P&L > 0.",
+    use: "Use this to see short-term momentum in your trading days."
+  });
+  metricCell(grid, "Red Day Streak", String(stats.daily_streaks.current_red), {
+    what: "Current run of consecutive red realized days.",
+    formula: "Count of most recent consecutive days where daily P&L < 0.",
+    use: "Use this to spot drawdown phases and slow down if needed."
+  });
+  metricCell(grid, "Longest Green", String(stats.daily_streaks.longest_green), {
+    what: "Longest run of consecutive green realized days.",
+    formula: "Maximum consecutive days with daily P&L > 0.",
+    use: "Use this to compare your best periods with your current rhythm."
+  });
+  metricCell(grid, "Longest Red", String(stats.daily_streaks.longest_red), {
+    what: "Longest run of consecutive red realized days.",
+    formula: "Maximum consecutive days with daily P&L < 0.",
+    use: "Use this to understand how deep rough patches tend to get."
+  });
+}
 function renderCalendar(parent, daily, weekly, trades, openFile, onShowTrades) {
   if (!daily.length) {
     parent.createEl("div", { text: "No trades yet", attr: { style: `color:${C.muted};font-size:11px;` } });
@@ -2215,6 +2327,66 @@ function renderDuration(parent, data) {
       sText(s, 50 + lW + 4, y + 11 + 18, String(d.losers), C.red, 9, "start");
   });
 }
+function renderDurationSummary(parent, stats) {
+  const grid = div(parent, "display:grid;grid-template-columns:repeat(4,minmax(120px,1fr));gap:8px;margin-bottom:12px;");
+  metricCell(grid, "Avg Hold Win", formatMinutes(stats.avg_hold_win_minutes), {
+    what: "Average time winning fully closed trades were held.",
+    formula: "Sum of winner hold time / number of winning trades.",
+    use: "Compare this with Avg Hold Loss to see if you cut winners too early."
+  });
+  metricCell(grid, "Avg Hold Loss", formatMinutes(stats.avg_hold_loss_minutes), {
+    what: "Average time losing fully closed trades were held.",
+    formula: "Sum of loser hold time / number of losing trades.",
+    use: "If this is much bigger than Avg Hold Win, you may be holding losers too long."
+  });
+  metricCell(grid, "Median Hold Win", formatMinutes(stats.median_hold_win_minutes), {
+    what: "Typical hold time for winners after removing outlier distortion.",
+    formula: "Median of winner hold times.",
+    use: "Use this to see your normal winning hold pattern."
+  });
+  metricCell(grid, "Median Hold Loss", formatMinutes(stats.median_hold_loss_minutes), {
+    what: "Typical hold time for losers after removing outlier distortion.",
+    formula: "Median of loser hold times.",
+    use: "Use this to see your normal losing hold pattern."
+  });
+}
+function renderSetupScoreBuckets(parent, stats) {
+  const table = parent.createEl("table", { attr: { style: `width:100%;border-collapse:collapse;font-size:12px;font-family:${F};` } });
+  const thead = table.createEl("thead");
+  const tbody = table.createEl("tbody");
+  const hr = thead.createEl("tr", { attr: { style: `background:var(--background-primary);` } });
+  ["Score Bucket", "Trades", "Win %", "Net P&L", "Avg R", "Avg %"].forEach((h) => hr.createEl("th", { text: h, attr: { style: `padding:8px 10px;text-align:left;color:${C.muted};border-bottom:1px solid ${C.border};font-size:10px;text-transform:uppercase;letter-spacing:1px;` } }));
+  stats.setup_score_buckets.forEach((row) => {
+    const tr = tbody.createEl("tr", { attr: { style: `border-bottom:1px solid ${C.border};` } });
+    [
+      { v: row.label, c: C.text, bold: true },
+      { v: String(row.trade_count), c: C.text },
+      { v: `${row.win_rate}%`, c: row.win_rate >= 50 ? C.green : C.red },
+      { v: fmtUSD(row.net_pnl), c: pc(row.net_pnl), bold: true },
+      { v: `${row.avg_r}R`, c: row.avg_r >= 0 ? C.green : C.red },
+      { v: `${row.avg_pct}%`, c: row.avg_pct >= 0 ? C.green : C.red }
+    ].forEach((cell) => tr.createEl("td", { text: cell.v, attr: { style: `padding:8px 10px;color:${cell.c};${cell.bold ? "font-weight:700;" : ""}` } }));
+  });
+}
+function renderMarketConditionBreakdown(parent, stats) {
+  const table = parent.createEl("table", { attr: { style: `width:100%;border-collapse:collapse;font-size:12px;font-family:${F};` } });
+  const thead = table.createEl("thead");
+  const tbody = table.createEl("tbody");
+  const hr = thead.createEl("tr", { attr: { style: `background:var(--background-primary);` } });
+  ["Condition", "Trades", "Win %", "Net P&L", "Avg R", "Avg %", "Exp R"].forEach((h) => hr.createEl("th", { text: h, attr: { style: `padding:8px 10px;text-align:left;color:${C.muted};border-bottom:1px solid ${C.border};font-size:10px;text-transform:uppercase;letter-spacing:1px;` } }));
+  stats.market_condition_stats.forEach((row) => {
+    const tr = tbody.createEl("tr", { attr: { style: `border-bottom:1px solid ${C.border};` } });
+    [
+      { v: row.label, c: C.text, bold: true },
+      { v: String(row.trade_count), c: C.text },
+      { v: `${row.win_rate}%`, c: row.win_rate >= 50 ? C.green : C.red },
+      { v: fmtUSD(row.net_pnl), c: pc(row.net_pnl), bold: true },
+      { v: `${row.avg_r}R`, c: row.avg_r >= 0 ? C.green : C.red },
+      { v: `${row.avg_pct}%`, c: row.avg_pct >= 0 ? C.green : C.red },
+      { v: `${row.expectancy_r}R`, c: row.expectancy_r >= 0 ? C.green : C.red }
+    ].forEach((cell) => tr.createEl("td", { text: cell.v, attr: { style: `padding:8px 10px;color:${cell.c};${cell.bold ? "font-weight:700;" : ""}` } }));
+  });
+}
 function renderStrategyTable(parent, stats, trades, onShowTrades) {
   const strategies = Object.values(stats.pnl_by_strategy);
   if (!strategies.length) {
@@ -2347,6 +2519,8 @@ function renderTradesList(parent, trades, openFile) {
     { label: "Trade P&L", key: "trade_total_pnl" },
     { label: "Trade ROI", key: "trade_total_pnl_pct" },
     { label: "Trade R", key: "trade_total_r" },
+    { label: "Trade Fees", key: "trade_total_fees" },
+    { label: "Note" },
     { label: "Side" },
     { label: "Strategy", key: "strategy" },
     { label: "Grade", key: "grade" },
@@ -2383,21 +2557,23 @@ function renderTradesList(parent, trades, openFile) {
   trades.forEach((t) => {
     var _a;
     const baseId = t.trade_id.replace(/#\d+$/, "");
-    const cur = (_a = aggregateByBase.get(baseId)) != null ? _a : { pnl: 0, filled: 0, exitCount: 0, entryPrice: t.entry_price, entrySize: t.entry_size, targetSl: t.target_sl };
+    const cur = (_a = aggregateByBase.get(baseId)) != null ? _a : { pnl: 0, filled: 0, exitCount: 0, entryPrice: t.entry_price, entrySize: t.entry_size, targetSl: t.target_sl, fees: t.entry_fees };
     cur.pnl += t.pnl;
     cur.filled += t.filled_size;
+    cur.fees += t.exit_fees;
     cur.exitCount = Math.max(cur.exitCount, t.exit_count);
     aggregateByBase.set(baseId, cur);
   });
   const getTradeTotals = (t) => {
-    var _a, _b, _c;
+    var _a, _b, _c, _d;
     const baseId = t.trade_id.replace(/#\d+$/, "");
     const agg = aggregateByBase.get(baseId);
     const totalPnl = (_a = agg == null ? void 0 : agg.pnl) != null ? _a : t.pnl;
     const totalPnlPct = agg && agg.entryPrice * agg.entrySize > 0 ? totalPnl / (agg.entryPrice * agg.entrySize) * 100 : 0;
     const riskPerUnit = Math.abs(((_b = agg == null ? void 0 : agg.entryPrice) != null ? _b : t.entry_price) - ((_c = agg == null ? void 0 : agg.targetSl) != null ? _c : t.target_sl));
     const totalR = agg && riskPerUnit > 0 && agg.entrySize > 0 ? totalPnl / (riskPerUnit * agg.entrySize) : 0;
-    return { totalPnl, totalPnlPct, totalR };
+    const totalFees = (_d = agg == null ? void 0 : agg.fees) != null ? _d : t.entry_fees + t.exit_fees;
+    return { totalPnl, totalPnlPct, totalR, totalFees };
   };
   const getSortVal = (t, k) => {
     const totals = getTradeTotals(t);
@@ -2423,6 +2599,8 @@ function renderTradesList(parent, trades, openFile) {
       return totals.totalPnlPct;
     if (k === "trade_total_r")
       return totals.totalR;
+    if (k === "trade_total_fees")
+      return totals.totalFees;
     if (k === "strategy")
       return t.strategy || "";
     if (k === "grade")
@@ -2453,8 +2631,8 @@ function renderTradesList(parent, trades, openFile) {
         { v: t.symbol, c: C.text, bold: true },
         { v: sLabel, c: sC, bg: sBg, pill: true },
         { v: t.exit_date, c: C.muted },
-        { v: `$${t.entry_price}`, c: C.text },
-        { v: `$${t.exit_price}`, c: C.text },
+        { v: fmtUSD(t.entry_price), c: C.text },
+        { v: fmtUSD(t.exit_price), c: C.text },
         { v: String(t.entry_size), c: C.text },
         { v: String(t.filled_size), c: C.text },
         { v: fmtUSD(t.pnl), c: pc(t.pnl), bold: true },
@@ -2463,6 +2641,8 @@ function renderTradesList(parent, trades, openFile) {
         { v: fmtUSD(totals.totalPnl), c: pc(totals.totalPnl), bold: true },
         { v: `${fmt(totals.totalPnlPct, 2)}%`, c: pc(totals.totalPnl) },
         { v: `${fmt(totals.totalR, 2)}R`, c: pc(totals.totalR) },
+        { v: fmtUSD(totals.totalFees), c: C.orange },
+        { v: (t.exit_note || t.entry_note || "\u2014").slice(0, 28), c: C.muted, title: t.exit_note || t.entry_note || "" },
         { v: t.dir.toUpperCase(), c: t.dir === "long" ? C.blue : C.orange },
         { v: t.strategy || "\u2014", c: C.muted },
         { v: t.grade, c: gC[t.grade] },
@@ -2473,7 +2653,9 @@ function renderTradesList(parent, trades, openFile) {
         if (cell.pill) {
           badge(td, cell.v, cell.c, cell.bg);
         } else {
-          td.createEl("span", { text: cell.v, attr: { style: `color:${cell.c};${cell.bold ? "font-weight:700;" : ""}` } });
+          const span = td.createEl("span", { text: cell.v, attr: { style: `color:${cell.c};${cell.bold ? "font-weight:700;" : ""}` } });
+          if (cell.title)
+            span.setAttribute("title", cell.title);
         }
       });
     });
@@ -2501,57 +2683,72 @@ function renderStatsBar(parent, stats, trades, openAnalytics, onShowTrades, open
   const wrap = div(parent, `display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px;padding:12px 16px;`);
   const dirStats = uniqueTradeDirStats(trades);
   const items = [
-    { label: "Net P&L", value: fmtUSD(stats.net_pnl), color: pc(stats.net_pnl) },
-    { label: "Net+Unreal", value: fmtUSD(stats.net_pnl + openAnalytics.totalUnrealizedPnl), color: pc(stats.net_pnl + openAnalytics.totalUnrealizedPnl) },
-    { label: "Win Rate", value: `${stats.win_rate}%`, color: stats.win_rate >= 50 ? C.green : C.red },
-    { label: "Profit Factor", value: stats.profit_factor === Infinity ? "\u221E" : String(stats.profit_factor), color: stats.profit_factor >= 1 ? C.green : C.red },
-    { label: "Day Win %", value: `${stats.day_win_rate}%`, color: stats.day_win_rate >= 50 ? C.green : C.red },
-    { label: "Avg Win", value: fmtUSD(stats.avg_win), color: C.green },
-    { label: "Avg Loss", value: fmtUSD(stats.avg_loss), color: C.red },
-    { label: "Largest Win", value: fmtUSD(stats.largest_win), color: C.green, click: () => stats.largest_win_trade && openFile(stats.largest_win_trade.exit_file) },
-    { label: "Largest Loss", value: fmtUSD(-stats.largest_loss), color: C.red, click: () => stats.largest_loss_trade && openFile(stats.largest_loss_trade.exit_file) },
-    { label: "Avg W/L Ratio", value: String(stats.avg_win_loss_ratio), color: stats.avg_win_loss_ratio >= 1 ? C.green : C.red, extra: stats.avg_win > 0 || stats.avg_loss > 0 ? { win: stats.avg_win, loss: stats.avg_loss } : null },
-    { label: "Avg R", value: `${stats.avg_r_multiple}R`, color: stats.avg_r_multiple >= 0 ? C.green : C.red },
-    { label: "Avg R Win", value: `${stats.avg_r_win}R`, color: C.green },
-    { label: "Avg R Loss", value: `${stats.avg_r_loss}R`, color: C.red },
-    { label: "Gain to Pain", value: stats.gain_to_pain === Infinity ? "\u221E" : String(stats.gain_to_pain), color: stats.gain_to_pain >= 1 ? C.green : C.red },
-    { label: "Max DD", value: `${stats.max_drawdown_pct.toFixed(1)}%`, color: C.red },
-    { label: "ROI", value: `${stats.overall_roi}%`, color: pc(stats.overall_roi) },
-    { label: "Balance", value: fmtUSD(stats.current_balance), color: C.blue },
-    { label: "Bal+Unreal", value: fmtUSD(stats.current_balance + openAnalytics.totalUnrealizedPnl), color: C.blue },
-    { label: "Long %", value: `${dirStats.longPct}%`, color: dirStats.longPct >= 50 ? C.green : C.text },
-    { label: "Short %", value: `${dirStats.shortPct}%`, color: dirStats.shortPct >= 50 ? C.red : C.text },
-    { label: "Unrealized R", value: `${openAnalytics.totalUnrealizedR}R`, color: openAnalytics.totalUnrealizedR >= 0 ? C.green : C.red },
-    { label: "Open Risk", value: fmtUSD(openAnalytics.totalOpenRiskToStop), color: C.orange },
-    { label: "Trades", value: `${stats.trade_count} (${stats.exit_count} exits)`, color: C.text, click: () => onShowTrades(trades) }
+    { label: "Net P&L", value: fmtUSD(stats.net_pnl), color: pc(stats.net_pnl), info: { what: "Total realized profit or loss closed in the selected period.", formula: "Sum of realized P&L on exit rows filtered by close date.", use: "Use this to see what you actually made or lost in the selected window." } },
+    { label: "Net+Unreal", value: fmtUSD(stats.net_pnl + openAnalytics.totalUnrealizedPnl), color: pc(stats.net_pnl + openAnalytics.totalUnrealizedPnl), info: { what: "Realized P&L plus current unrealized P&L on open positions.", formula: "Net P&L + total unrealized P&L.", use: "Use this to see the account result if open positions were marked at the latest close." } },
+    { label: "Win Rate", value: `${stats.win_rate}%`, color: stats.win_rate >= 50 ? C.green : C.red, info: { what: "Percent of fully closed trades that finished positive.", formula: "Winning trades / fully closed trades \xD7 100.", use: "Use this to judge hit rate, but always compare it with Avg Win, Avg Loss and Expectancy." } },
+    { label: "Profit Factor", value: stats.profit_factor === Infinity ? "\u221E" : String(stats.profit_factor), color: stats.profit_factor >= 1 ? C.green : C.red, info: { what: "How much gross profit you make for each unit of gross loss.", formula: "Gross profit / gross loss.", use: "Above 1 means profitable. Higher is better, but sample size matters." } },
+    { label: "Expectancy $", value: fmtUSD(stats.expectancy_pnl), color: pc(stats.expectancy_pnl), info: { what: "Average dollars made or lost per fully closed trade.", formula: "Total trade P&L / number of fully closed trades.", use: "Use this to measure edge per trade in cash terms." } },
+    { label: "Expectancy R", value: `${stats.expectancy_r}R`, color: stats.expectancy_r >= 0 ? C.green : C.red, info: { what: "Average R made or lost per fully closed trade.", formula: "Total R / number of fully closed trades.", use: "This is one of the best edge metrics because it normalizes for risk size." } },
+    { label: "Day Win %", value: `${stats.day_win_rate}%`, color: stats.day_win_rate >= 50 ? C.green : C.red, info: { what: "Percent of realized trading days that closed green.", formula: "Green days / realized trading days \xD7 100.", use: "Use this to see how often your days finish positive, not just individual trades." } },
+    { label: "Avg Win", value: fmtUSD(stats.avg_win), color: C.green, info: { what: "Average profit on winning fully closed trades.", formula: "Gross profit / number of winning trades.", use: "Compare this with Avg Loss to see if your winners are big enough." } },
+    { label: "Avg Loss", value: fmtUSD(stats.avg_loss), color: C.red, info: { what: "Average loss on losing fully closed trades.", formula: "Absolute gross loss / number of losing trades.", use: "Use this to see how expensive your losing trades are." } },
+    { label: "Median Win", value: fmtUSD(stats.median_win), color: C.green, info: { what: "Middle winning trade profit after sorting winners from small to large.", formula: "Median of winning trade P&L.", use: "Use this to reduce the distortion caused by one or two huge winners." } },
+    { label: "Median Loss", value: fmtUSD(-stats.median_loss), color: C.red, info: { what: "Middle losing trade size after sorting losers.", formula: "Median of losing trade P&L magnitude.", use: "Use this to see a more typical losing trade than Avg Loss." } },
+    { label: "Largest Win", value: fmtUSD(stats.largest_win), color: C.green, click: () => stats.largest_win_trade && openFile(stats.largest_win_trade.exit_file), info: { what: "Best fully closed trade in dollars.", formula: "Maximum aggregated trade P&L.", use: "Use this to inspect what your best trade looked like and whether it was repeatable." } },
+    { label: "Largest Loss", value: fmtUSD(-stats.largest_loss), color: C.red, click: () => stats.largest_loss_trade && openFile(stats.largest_loss_trade.exit_file), info: { what: "Worst fully closed trade in dollars.", formula: "Minimum aggregated trade P&L.", use: "Use this to review mistakes, bad conditions, or bad risk control." } },
+    { label: "Avg W/L Ratio", value: String(stats.avg_win_loss_ratio), color: stats.avg_win_loss_ratio >= 1 ? C.green : C.red, info: { what: "How large the average win is compared with the average loss.", formula: "Avg Win / Avg Loss.", use: "Above 1 means your average winner is larger than your average loser." }, extra: stats.avg_win > 0 || stats.avg_loss > 0 ? { win: stats.avg_win, loss: stats.avg_loss } : null },
+    { label: "Avg % Win", value: `${stats.avg_win_pct}%`, color: C.green, info: { what: "Average ROI of winning fully closed trades.", formula: "Average winning trade P&L %.", use: "Use this to compare winner quality independent of cash size." } },
+    { label: "Avg % Loss", value: `${stats.avg_loss_pct}%`, color: C.red, info: { what: "Average ROI of losing fully closed trades.", formula: "Average losing trade P&L %.", use: "Use this to see how hard losers hit in percentage terms." } },
+    { label: "Avg R", value: `${stats.avg_r_multiple}R`, color: stats.avg_r_multiple >= 0 ? C.green : C.red, info: { what: "Average R multiple across fully closed trades.", formula: "Total R / fully closed trades.", use: "Use this to compare performance in risk units instead of dollars." } },
+    { label: "Median R", value: `${stats.median_r}R`, color: stats.median_r >= 0 ? C.green : C.red, info: { what: "Middle R result after sorting fully closed trades.", formula: "Median of trade R multiples.", use: "Use this to see your typical risk-adjusted result without outliers dominating it." } },
+    { label: "Avg R Win", value: `${stats.avg_r_win}R`, color: C.green, info: { what: "Average R on winning fully closed trades.", formula: "Sum of winning R / number of winning trades.", use: "Use this to see how much reward your winners usually deliver." } },
+    { label: "Avg R Loss", value: `${stats.avg_r_loss}R`, color: C.red, info: { what: "Average R on losing fully closed trades.", formula: "Sum of losing R / number of losing trades.", use: "Use this to see if your losers stay close to plan." } },
+    { label: "Fees", value: fmtUSD(stats.total_fees), color: C.orange, info: { what: "Total commissions/fees paid by fully closed trades.", formula: "Sum of entry fees + exit fees for fully closed trades.", use: "Use this to see how much execution costs are eating into your edge." } },
+    { label: "Fees % GP", value: `${stats.fees_pct_gross_profit}%`, color: stats.fees_pct_gross_profit <= 10 ? C.green : C.red, info: { what: "Fees as a share of gross profit.", formula: "Total fees / gross profit \xD7 100.", use: "Use this to see whether scale-outs or overtrading are making costs too heavy." } },
+    { label: "Avg Fees", value: fmtUSD(stats.avg_fees_per_trade), color: C.orange, info: { what: "Average fees paid per fully closed trade.", formula: "Total fees / fully closed trades.", use: "Use this to compare trading cost efficiency across periods." } },
+    { label: "Max DD", value: `${stats.max_drawdown_pct.toFixed(1)}%`, color: C.red, info: { what: "Largest peak-to-trough drop in the selected realized equity curve.", formula: "Biggest equity decline from prior high, in %.", use: "Use this to understand pain level and risk of the current period." } },
+    { label: "ROI", value: `${stats.overall_roi}%`, color: pc(stats.overall_roi), info: { what: "Return from realized P&L in the selected period versus initial balance.", formula: "Net P&L / initial balance \xD7 100.", use: "Use this as a simple percent return view for the selected period." } },
+    { label: "Balance", value: fmtUSD(stats.current_balance), color: C.blue, info: { what: "Current realized account balance for the selected account.", formula: "Initial balance + deposits - withdrawals + all realized P&L.", use: "Use this as your up-to-date realized account value." } },
+    { label: "Bal+Unreal", value: fmtUSD(stats.current_balance + openAnalytics.totalUnrealizedPnl), color: C.blue, info: { what: "Current realized balance plus unrealized P&L on open positions.", formula: "Balance + total unrealized P&L.", use: "Use this to see a marked-to-market balance snapshot." } },
+    { label: "Long %", value: `${dirStats.longPct}%`, color: dirStats.longPct >= 50 ? C.green : C.text, info: { what: "Share of unique filtered trades that were long.", formula: "Long trades / total trades \xD7 100.", use: "Use this to see whether your book is too biased to one side." } },
+    { label: "Short %", value: `${dirStats.shortPct}%`, color: dirStats.shortPct >= 50 ? C.red : C.text, info: { what: "Share of unique filtered trades that were short.", formula: "Short trades / total trades \xD7 100.", use: "Use this to see whether short exposure is helping or hurting results." } },
+    { label: "Unrealized R", value: `${openAnalytics.totalUnrealizedR}R`, color: openAnalytics.totalUnrealizedR >= 0 ? C.green : C.red, info: { what: "Current unrealized P&L on open positions measured in R.", formula: "Sum of unrealized P&L / planned risk.", use: "Use this to see open trade performance in risk units." } },
+    { label: "Open Risk", value: fmtUSD(openAnalytics.totalOpenRiskToStop), color: C.orange, info: { what: "Distance from current prices to stops for the remaining open shares.", formula: "Sum of |current price - stop| \xD7 remaining shares.", use: "Use this to see how much open downside is still on the table if stops are hit." } },
+    { label: "Trades", value: `${stats.trade_count} (${stats.exit_count} exits)`, color: C.text, click: () => onShowTrades(trades), info: { what: "Unique opened trades in the cohort, with exit row count in brackets.", formula: "Unique base trade IDs; bracket shows total exit records.", use: "Use this to understand sample size and how much partial exiting happened." } }
   ];
   items.forEach((item) => {
-    const c = div(wrap, `background:${C.card};border:1px solid ${C.border};border-radius:10px;padding:10px;`);
-    c.createEl("div", { text: item.label, attr: { style: `color:${C.muted};font-size:9px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:4px;font-family:${F};` } });
-    const valEl = c.createEl("div", { text: item.value, attr: { style: `color:${item.color};font-size:18px;font-weight:700;font-family:${F};${item.click ? "cursor:pointer;text-decoration:underline;text-underline-offset:3px;" : ""}` } });
-    if (item.click)
-      valEl.addEventListener("click", item.click);
+    renderMetricCard(wrap, item.label, item.value, item.color, item.info, item.click);
     if (item.extra) {
+      const c = wrap.lastElementChild;
       const barWrap = div(c, "display:flex;align-items:center;gap:4px;margin-top:6px;");
       const total = item.extra.win + item.extra.loss;
       const winPct = total > 0 ? item.extra.win / total * 100 : 50;
       const bar = div(barWrap, `flex:1;height:6px;border-radius:3px;overflow:hidden;display:flex;`);
       div(bar, `width:${winPct}%;background:${C.green};`);
       div(bar, `flex:1;background:${C.red};`);
-      barWrap.createEl("span", { text: `$${item.extra.win.toFixed(0)}`, attr: { style: `color:${C.green};font-size:9px;font-weight:700;font-family:${F};` } });
-      barWrap.createEl("span", { text: `-$${item.extra.loss.toFixed(0)}`, attr: { style: `color:${C.red};font-size:9px;font-weight:700;font-family:${F};` } });
+      barWrap.createEl("span", { text: fmtUSD(item.extra.win), attr: { style: `color:${C.green};font-size:9px;font-weight:700;font-family:${F};` } });
+      barWrap.createEl("span", { text: fmtUSD(-item.extra.loss), attr: { style: `color:${C.red};font-size:9px;font-weight:700;font-family:${F};` } });
     }
   });
 }
-function renderFilters(parent, trades, filters, onChange) {
-  var _a, _b, _c, _d, _e, _f, _g;
+function renderFilters(parent, trades, openRows, events, filters, onChange) {
+  var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j;
   const wrap = div(parent, `display:flex;gap:6px;flex-wrap:wrap;align-items:center;padding:10px 16px;background:${C.card};border-bottom:1px solid ${C.border};`);
   const selSt = `background:var(--background-primary);color:${C.text};border:1px solid ${C.border};border-radius:6px;padding:5px 8px;font-size:11px;font-family:${F};cursor:pointer;`;
   const btnSt = `background:var(--background-primary);color:${C.muted};border:1px solid ${C.border};border-radius:6px;padding:5px 10px;font-size:11px;cursor:pointer;font-family:${F};`;
   const actSt = `background:rgba(96,165,250,0.15);color:${C.blue};border:1px solid ${C.blue};border-radius:6px;padding:5px 10px;font-size:11px;cursor:pointer;font-family:${F};`;
-  const strategies = [...new Set(trades.map((t) => t.strategy).filter(Boolean))];
-  const accounts = [...new Set(trades.map((t) => t.account).filter(Boolean))];
-  const symbols = [...new Set(trades.map((t) => t.symbol).filter(Boolean))];
+  const strategies = [...new Set([...trades.map((t) => t.strategy), ...openRows.map((r) => r.strategy)].filter(Boolean))];
+  const accounts = [...new Set([...trades.map((t) => t.account), ...openRows.map((r) => r.account), ...events.map((e) => e.account)].filter(Boolean))];
+  const symbols = [...new Set([...trades.map((t) => t.symbol), ...openRows.map((r) => r.symbol)].filter(Boolean))];
+  const weekdays = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"];
+  const marketConditions = ["Bad", "Poor", "Neutral", "Good", "Excellent"];
+  const statuses = ["open", "closed", "partial"];
+  const holdBuckets = [
+    { label: "Same day", value: "same-day" },
+    { label: "2\u20135 days", value: "2-5d" },
+    { label: "1\u20132 weeks", value: "1-2w" },
+    { label: "2+ weeks", value: "2w+" }
+  ];
   const monthStartIso = () => {
     const d = new Date();
     d.setDate(1);
@@ -2619,6 +2816,17 @@ function renderFilters(parent, trades, filters, onChange) {
   mkSel("All Grades", ["A", "B", "C", "D"], (_e = filters.grade) != null ? _e : "", "grade");
   mkSel("Long/Short", ["long", "short"], (_f = filters.dir) != null ? _f : "", "dir");
   mkSel("All Symbols", symbols, (_g = filters.symbol) != null ? _g : "", "symbol");
+  mkSel("All Conditions", marketConditions, (_h = filters.market_condition) != null ? _h : "", "market_condition");
+  mkSel("All Weekdays", weekdays, (_i = filters.weekday) != null ? _i : "", "weekday");
+  mkSel("All Status", statuses, (_j = filters.status) != null ? _j : "", "status");
+  const holdSel = wrap.createEl("select", { attr: { style: selSt } });
+  holdSel.createEl("option", { text: "All Durations", attr: { value: "" } });
+  holdBuckets.forEach((o) => {
+    const op = holdSel.createEl("option", { text: o.label, attr: { value: o.value } });
+    if (filters.hold_bucket === o.value)
+      op.setAttribute("selected", "true");
+  });
+  holdSel.addEventListener("change", () => onChange(__spreadProps(__spreadValues({}, filters), { hold_bucket: holdSel.value || void 0 })));
   const rebuildBtn = wrap.createEl("button", { text: "\u27F3 Rebuild", attr: { style: `${btnSt}margin-left:auto;` } });
   rebuildBtn.addEventListener("click", () => {
     var _a2, _b2;
@@ -2639,10 +2847,8 @@ function rowPairStyles(left, right) {
     return [valueStyle(C.red), valueStyle(C.green)];
   return ["color:var(--text-normal);font-weight:700;", "color:var(--text-normal);font-weight:700;"];
 }
-function metricCell(parent, label, value) {
-  const m = card(parent, "padding:12px;");
-  m.createEl("div", { text: label, attr: { style: `color:${C.muted};font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;margin-bottom:6px;font-family:${F};` } });
-  m.createEl("div", { text: value, attr: { style: `color:${C.text};font-size:18px;font-weight:700;font-family:${F};` } });
+function metricCell(parent, label, value, info) {
+  renderMetricCard(parent, label, value, C.text, info);
 }
 function filterOpenRows(openRows, filters) {
   return openRows.filter((r) => {
@@ -2661,6 +2867,13 @@ function filterOpenRows(openRows, filters) {
     if (filters.grade && grade !== filters.grade)
       return false;
     if (filters.symbol && r.symbol.toUpperCase() !== filters.symbol.toUpperCase())
+      return false;
+    if (filters.weekday) {
+      const day = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"][new Date(r.date).getDay()];
+      if (day !== filters.weekday)
+        return false;
+    }
+    if (filters.status && filters.status !== "open")
       return false;
     return true;
   });
@@ -2689,11 +2902,11 @@ function renderOpenPositionDetails(parent, analytics, openFile) {
     return;
   }
   const tableWrap = div(parent, "overflow:auto;border:1px solid var(--background-modifier-border);border-radius:8px;");
-  const table = tableWrap.createEl("table", { attr: { style: `width:100%;border-collapse:collapse;font-size:11px;font-family:${F};min-width:1120px;` } });
+  const table = tableWrap.createEl("table", { attr: { style: `width:100%;border-collapse:collapse;font-size:11px;font-family:${F};min-width:1360px;` } });
   const thead = table.createEl("thead");
   const tbody = table.createEl("tbody");
   const hdr = thead.createEl("tr", { attr: { style: `background:${C.card};` } });
-  ["Symbol", "Initial Shares", "Current Shares", "Open Value", "Current Value", "Real %", "Unreal %", "Real R", "Unreal R", "Total R", "Last Close"].forEach((h) => {
+  ["Symbol", "Initial Shares", "Current Shares", "Open Value", "Current Value", "Real $", "Unreal $", "Real %", "Unreal %", "Real R", "Unreal R", "Total R", "Last Close"].forEach((h) => {
     hdr.createEl("th", { text: h, attr: { style: `padding:8px;border-bottom:1px solid ${C.border};text-align:right;color:${C.muted};font-size:10px;text-transform:uppercase;letter-spacing:0.5px;white-space:nowrap;` } });
   });
   analytics.positions.forEach((p) => {
@@ -2705,12 +2918,14 @@ function renderOpenPositionDetails(parent, analytics, openFile) {
       { text: fmt(p.remainingSize, 0), style: `padding:8px;text-align:right;color:${C.text};font-weight:700;` },
       { text: fmtUSD(p.openingValue), style: `padding:8px;text-align:right;color:${C.text};` },
       { text: fmtUSD(p.currentValue), style: `padding:8px;text-align:right;color:${C.blue};font-weight:700;` },
+      { text: fmtUSD(p.realizedPnl), style: `padding:8px;text-align:right;color:${pc(p.realizedPnl)};font-weight:700;` },
+      { text: fmtUSD(p.unrealizedPnl), style: `padding:8px;text-align:right;color:${pc(p.unrealizedPnl)};font-weight:700;` },
       { text: `${p.realizedPct >= 0 ? "+" : ""}${fmt(p.realizedPct)}%`, style: `padding:8px;text-align:right;color:${pc(p.realizedPct)};font-weight:700;` },
       { text: `${p.unrealizedPct >= 0 ? "+" : ""}${fmt(p.unrealizedPct)}%`, style: `padding:8px;text-align:right;color:${pc(p.unrealizedPct)};font-weight:700;` },
       { text: `${p.realizedR}R`, style: `padding:8px;text-align:right;color:${p.realizedR >= 0 ? C.green : C.red};font-weight:700;` },
       { text: `${p.unrealizedR}R`, style: `padding:8px;text-align:right;color:${p.unrealizedR >= 0 ? C.green : C.red};font-weight:700;` },
       { text: `${p.totalR}R`, style: `padding:8px;text-align:right;color:${p.totalR >= 0 ? C.green : C.red};font-weight:700;` },
-      { text: p.latestClose ? `$${fmt(p.latestClose.close)}` : "\u2014", style: `padding:8px;text-align:right;color:${C.muted};` }
+      { text: p.latestClose ? fmtUSD(p.latestClose.close) : "\u2014", style: `padding:8px;text-align:right;color:${C.muted};` }
     ];
     cells.forEach((cell) => tr.createEl("td", { text: cell.text, attr: { style: cell.style } }));
   });
@@ -3223,10 +3438,12 @@ function renderMarketMonitorView(container, marketData, visibleRows, onLoadMore,
   cardTitle(chartCard, "Breadth Charts");
   renderMarketCharts(chartCard, marketData.highLowRows, marketData.advanceDeclineRows, chartFrom, chartTo, onChartRange);
 }
-function renderDashboard(container, stats, allTrades, trades, openRows, openAnalytics, events, filters, onFilterChange, openFile, marketData, state) {
+function renderDashboard(container, stats, allTrades, trades, realizedTrades, openRows, openAnalytics, events, filters, onFilterChange, openFile, marketData, state) {
+  HIDE_MONEY = state.hideMoney;
   container.style.cssText = `background:${C.bg};height:100%;display:flex;flex-direction:column;overflow:hidden;font-family:${F};color:${C.text};`;
   let tradeListData = trades;
   const redraw = () => {
+    HIDE_MONEY = state.hideMoney;
     container.empty();
     container.style.cssText = `background:${C.bg};height:100%;display:flex;flex-direction:column;overflow:hidden;font-family:${F};color:${C.text};`;
     const hdr = div(container, `display:flex;align-items:center;justify-content:space-between;padding:14px 16px;border-bottom:1px solid ${C.border};background:${C.card};flex-shrink:0;position:sticky;top:0;z-index:50;`);
@@ -3238,6 +3455,7 @@ function renderDashboard(container, stats, allTrades, trades, openRows, openAnal
     const dashBtn = hRight.createEl("button", { text: "Dashboard", attr: { style: state.activeTab === "dashboard" ? actTab : inTab } });
     const tradesBtn = hRight.createEl("button", { text: "Trades", attr: { style: state.activeTab === "trades" ? actTab : inTab } });
     const marketBtn = hRight.createEl("button", { text: "Market Monitor", attr: { style: state.activeTab === "market" ? actTab : inTab } });
+    const moneyBtn = hRight.createEl("button", { text: state.hideMoney ? "Show $" : "Hide $", attr: { style: state.hideMoney ? actTab : inTab } });
     dashBtn.addEventListener("click", () => {
       state.activeTab = "dashboard";
       redraw();
@@ -3251,13 +3469,17 @@ function renderDashboard(container, stats, allTrades, trades, openRows, openAnal
       state.activeTab = "market";
       redraw();
     });
+    moneyBtn.addEventListener("click", () => {
+      state.hideMoney = !state.hideMoney;
+      redraw();
+    });
     const onShowTrades = (t) => {
       state.activeTab = "trades";
       tradeListData = t;
       redraw();
     };
     if (state.activeTab !== "market")
-      renderFilters(container, allTrades, filters, (f) => {
+      renderFilters(container, allTrades, openRows, events, filters, (f) => {
         onFilterChange(f);
       });
     const content = div(container, "flex:1;min-height:0;overflow-y:auto;");
@@ -3329,22 +3551,24 @@ function renderDashboard(container, stats, allTrades, trades, openRows, openAnal
     const g2 = div(content, "display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:12px 16px 0;");
     const mb = card(g2);
     cardTitle(mb, "Monthly P&L");
-    renderMonthlyBars(mb, stats.monthly_pnl, trades, onShowTrades);
+    renderMonthlyBars(mb, stats.monthly_pnl, realizedTrades, onShowTrades);
     const sk = card(g2);
     cardTitle(sk, "Win/Loss Streak");
-    renderStreak(sk, stats.streak, trades, onShowTrades);
+    renderStreak(sk, stats.streak, realizedTrades, onShowTrades);
     const lw = card(content, "margin:12px 16px 0;");
     cardTitle(lw, "Largest Win & Loss");
     renderLargest(lw, stats, openFile);
     const cal = card(content, "margin:12px 16px 0;overflow-x:auto;");
     cardTitle(cal, "P&L Calendar");
-    renderCalendar(cal, stats.daily_pnl, stats.weekly_pnl, trades, openFile, onShowTrades);
+    renderCalendarStats(cal, stats);
+    renderCalendar(cal, stats.daily_pnl, stats.weekly_pnl, realizedTrades, openFile, onShowTrades);
     const g3 = div(content, "display:grid;grid-template-columns:3fr 2fr;gap:12px;padding:12px 16px 0;");
     const ts = card(g3);
     cardTitle(ts, "Entry Time Performance (13:00\u201322:00, 30min)");
     renderTimeSlots(ts, stats.pnl_by_slot);
     const dr = card(g3);
     cardTitle(dr, "Trade Duration");
+    renderDurationSummary(dr, stats);
     renderDuration(dr, stats.duration_by_outcome);
     const st = card(content, "margin:12px 16px 0;");
     cardTitle(st, "Strategy Breakdown");
@@ -3352,6 +3576,12 @@ function renderDashboard(container, stats, allTrades, trades, openRows, openAnal
     const gr = card(content, "margin:12px 16px 0;");
     cardTitle(gr, "Grade Breakdown");
     renderGrades(gr, stats, trades, onShowTrades);
+    const sb = card(content, "margin:12px 16px 0;");
+    cardTitle(sb, "Setup Score Buckets");
+    renderSetupScoreBuckets(sb, stats);
+    const mcb = card(content, "margin:12px 16px 0;");
+    cardTitle(mcb, "Market Condition Breakdown");
+    renderMarketConditionBreakdown(mcb, stats);
     const mc = card(content, "margin:12px 16px 16px;");
     addExpandBtn(mc, "Market Conditions vs P&L", (c) => renderCorrelation(c, stats.market_correlation, 900));
     cardTitle(mc, "Market Conditions vs P&L");
@@ -3383,7 +3613,8 @@ var DashboardView = class extends import_obsidian4.ItemView {
         const d = String(dt.getDate()).padStart(2, "0");
         return `${y}-${m}-${d}`;
       })(),
-      chartDateTo: ""
+      chartDateTo: "",
+      hideMoney: false
     };
     this.unsubscribe = null;
     this.renderSeq = 0;
@@ -3426,6 +3657,7 @@ var DashboardView = class extends import_obsidian4.ItemView {
       const openRows = this.cache.getOpenRows();
       const events = this.cache.getAccountEvents();
       const filtered = filterTrades(allTrades, this.filters);
+      const realizedFiltered = filterTradesByExitDate(allTrades, this.filters);
       const stats = calcStats(allTrades, events, this.filters);
       const [marketData, openAnalytics] = yield Promise.all([
         this.marketMonitor.getDashboardData(),
@@ -3438,6 +3670,7 @@ var DashboardView = class extends import_obsidian4.ItemView {
         stats,
         allTrades,
         filtered,
+        realizedFiltered,
         openRows,
         openAnalytics,
         events,
@@ -3465,6 +3698,7 @@ var DashboardView = class extends import_obsidian4.ItemView {
 var SidebarView = class extends import_obsidian4.ItemView {
   constructor(leaf, cache) {
     super(leaf);
+    this.accountFilter = "swings";
     this.unsubscribe = null;
     this.cache = cache;
   }
@@ -3504,16 +3738,38 @@ var SidebarView = class extends import_obsidian4.ItemView {
     });
   }
   render() {
+    var _a;
     const container = this.containerEl.children[1];
     container.empty();
     container.style.cssText = "padding:12px;min-height:100%;";
-    const trades = this.cache.getTrades();
+    const allTrades = this.cache.getTrades();
+    const allOpen = this.cache.getOpenRows();
     const events = this.cache.getAccountEvents();
-    const stats = calcStats(trades, events, {});
+    const accounts = [...new Set([...allTrades.map((t) => t.account), ...allOpen.map((r) => r.account), ...events.map((e) => e.account)].filter(Boolean))].sort();
+    if (this.accountFilter && !accounts.includes(this.accountFilter))
+      this.accountFilter = (_a = accounts[0]) != null ? _a : "";
+    const tradeFilters = this.accountFilter ? { account: this.accountFilter } : {};
+    const trades = filterTrades(allTrades, tradeFilters);
+    const open = allOpen.filter((r) => !this.accountFilter || r.account === this.accountFilter);
+    const stats = calcStats(allTrades, events, tradeFilters);
     const f = "var(--font-interface),var(--font-text),monospace";
     const streak = stats.streak;
     const wrap = container.createEl("div", { attr: { style: `font-family:${f};` } });
     wrap.createEl("div", { text: "Trading Summary", attr: { style: "color:var(--text-normal);font-size:13px;font-weight:700;margin-bottom:10px;border-bottom:1px solid var(--background-modifier-border);padding-bottom:8px;" } });
+    if (accounts.length) {
+      const filterRow = wrap.createEl("div", { attr: { style: "margin-bottom:10px;" } });
+      const sel = filterRow.createEl("select", { attr: { style: "width:100%;background:var(--background-primary);color:var(--text-normal);border:1px solid var(--background-modifier-border);border-radius:6px;padding:6px 8px;font-size:11px;" } });
+      sel.createEl("option", { text: "All Accounts", attr: { value: "" } });
+      accounts.forEach((acc) => {
+        const op = sel.createEl("option", { text: acc, attr: { value: acc } });
+        if (acc === this.accountFilter)
+          op.setAttribute("selected", "true");
+      });
+      sel.addEventListener("change", () => {
+        this.accountFilter = sel.value;
+        this.render();
+      });
+    }
     const uniqueDirs = /* @__PURE__ */ new Map();
     trades.forEach((t) => {
       const baseId = t.trade_id.replace(/#\d+$/, "");
@@ -3535,7 +3791,6 @@ var SidebarView = class extends import_obsidian4.ItemView {
       { label: "Avg R", value: `${stats.avg_r_multiple}R`, color: stats.avg_r_multiple >= 0 ? "#4ade80" : "#f87171" },
       { label: "Avg R Win", value: `${stats.avg_r_win}R`, color: "#4ade80" },
       { label: "Avg R Loss", value: `${stats.avg_r_loss}R`, color: "#f87171" },
-      { label: "Gain to Pain", value: stats.gain_to_pain === Infinity ? "\u221E" : String(stats.gain_to_pain), color: stats.gain_to_pain >= 1 ? "#4ade80" : "#f87171" },
       { label: "Max DD", value: `${stats.max_drawdown_pct.toFixed(1)}%`, color: "#f87171" },
       { label: "ROI", value: `${stats.overall_roi}%`, color: stats.overall_roi >= 0 ? "#4ade80" : "#f87171" },
       { label: "Balance", value: `$${stats.current_balance.toFixed(2)}`, color: "#60a5fa" },
@@ -3563,11 +3818,10 @@ var SidebarView = class extends import_obsidian4.ItemView {
       const mLabel = streak.momentum === "hot" ? "\u{1F525} Hot" : streak.momentum === "cold" ? "\u2744\uFE0F Cold" : "\u3030\uFE0F Mixed";
       streakRow.createEl("span", { text: mLabel, attr: { style: `color:${streak.momentum === "hot" ? "#facc15" : streak.momentum === "cold" ? "#60a5fa" : "var(--text-muted)"};font-size:11px;margin-left:4px;font-weight:700;` } });
     }
-    const open = this.cache.getOpenRows();
     if (open.length) {
       wrap.createEl("div", { text: `Open Positions (${open.length})`, attr: { style: "color:#facc15;font-size:11px;font-weight:700;margin-top:12px;margin-bottom:6px;" } });
       open.forEach((r) => {
-        var _a;
+        var _a2;
         const baseId = r.trade_id;
         const relatedExit = trades.find((t) => t.trade_id.replace(/#[0-9]+$/, "") === baseId);
         const initialSize = relatedExit ? relatedExit.entry_size : r.size;
@@ -3579,7 +3833,7 @@ var SidebarView = class extends import_obsidian4.ItemView {
             void this.openFile(r.filePath);
         });
         const row1 = posWrap.createEl("div", { attr: { style: "display:flex;justify-content:space-between;align-items:center;margin-bottom:3px;" } });
-        row1.createEl("span", { text: `${r.symbol} ${((_a = r.dir) != null ? _a : "").toUpperCase()}`, attr: { style: "color:var(--text-normal);font-size:12px;font-weight:700;" } });
+        row1.createEl("span", { text: `${r.symbol} ${((_a2 = r.dir) != null ? _a2 : "").toUpperCase()}`, attr: { style: "color:var(--text-normal);font-size:12px;font-weight:700;" } });
         row1.createEl("span", { text: `@$${r.price}`, attr: { style: "color:var(--text-muted);font-size:11px;" } });
         const row2 = posWrap.createEl("div", { attr: { style: "display:flex;justify-content:space-between;align-items:center;margin-bottom:2px;" } });
         row2.createEl("span", { text: `${currentSize} / ${initialSize} shares`, attr: { style: "color:var(--text-muted);font-size:10px;" } });
@@ -3617,15 +3871,13 @@ var TradingJournalPlugin = class extends import_obsidian4.Plugin {
         })
       });
       this.addCommand({
-        id: "update-market-monitor-and-frontmatter",
-        name: "Update Market Data + Daily Frontmatter",
+        id: "update-market-monitor",
+        name: "Update Market Data",
         callback: () => __async(this, null, function* () {
           var _a;
-          const result = yield this.marketMonitor.syncActiveOrTodayNote();
-          if (result.updatedFrontmatter) {
-            new import_obsidian4.Notice(`Market data synced${result.updatedMarketData ? " and Market Data.md updated" : ""}`);
-          } else if (result.updatedMarketData) {
-            new import_obsidian4.Notice(`Market Data.md updated${result.skipped ? ` \u2014 ${result.skipped}` : ""}`);
+          const result = yield this.marketMonitor.updateMarketData();
+          if (result.updatedMarketData) {
+            new import_obsidian4.Notice("Market Data.md updated");
           } else {
             new import_obsidian4.Notice((_a = result.skipped) != null ? _a : "No market monitor updates were applied.");
           }
@@ -3684,13 +3936,6 @@ Summary: ${found} with score, ${missing} without`);
           new import_obsidian4.Notice("Debug data dumped to console (Ctrl+Shift+I to open DevTools)");
         }
       });
-      this.registerEvent(this.app.vault.on("create", (file) => {
-        void this.marketMonitor.syncForCreatedFile(file);
-      }));
-      this.registerEvent(this.app.workspace.on("file-open", (file) => {
-        if (file)
-          void this.marketMonitor.syncForCreatedFile(file);
-      }));
       this.app.workspace.onLayoutReady(() => this.openSidebar());
     });
   }

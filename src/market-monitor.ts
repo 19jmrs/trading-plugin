@@ -1,10 +1,8 @@
-import { Plugin, TAbstractFile, TFile, requestUrl } from "obsidian";
+import { Plugin, TFile, requestUrl } from "obsidian";
 import { Trade, TradeRow, TradeFilters, TradeGrade } from "./types";
 
-const JOURNAL_FOLDER = "Master/Journal";
 const MARKET_DATA_FILE = "Market Data.md";
 const PRICE_CACHE_FILE = ".trading-price-cache.json";
-const JOURNAL_DATE_RE = /(\d{4}-\d{2}-\d{2})/;
 
 const MARKET_MONITOR_HEADING = /^##\s+Market Monitor\s*$/i;
 const ADV_DEC_HEADING = /^##\s+Advance\/Decline\s*$/i;
@@ -129,15 +127,8 @@ export interface OpenPositionAnalytics {
   balanceWithUnrealized: number;
 }
 
-interface QqqeSignals {
-  qqqe_ema1020: boolean;
-  qqqe_ema5: boolean;
-  qqqe_wema1020: boolean;
-}
-
 export interface MarketMonitorSyncResult {
   updatedMarketData: boolean;
-  updatedFrontmatter: boolean;
   skipped?: string;
 }
 
@@ -159,14 +150,6 @@ function getGrade(score: number): TradeGrade {
   if (score >= 30) return "B";
   if (score >= 15) return "C";
   return "D";
-}
-
-function todayIso(): string {
-  const now = new Date();
-  const y = now.getFullYear();
-  const m = String(now.getMonth() + 1).padStart(2, "0");
-  const d = String(now.getDate()).padStart(2, "0");
-  return `${y}-${m}-${d}`;
 }
 
 function formatRatio(value: number): string {
@@ -198,16 +181,6 @@ function formatIsoToDisplay(value: string): string {
   if (!m) return value;
   const [, yyyy, mm, dd] = m;
   return `${dd}/${mm}/${yyyy}`;
-}
-
-function extractJournalDate(file: TFile): string | null {
-  return file.basename.match(JOURNAL_DATE_RE)?.[1] ?? null;
-}
-
-function isWeekday(dateIso: string): boolean {
-  const [y, m, d] = dateIso.split("-").map(Number);
-  const day = new Date(Date.UTC(y, m - 1, d)).getUTCDay();
-  return day >= 1 && day <= 5;
 }
 
 function findTableByHeading(content: string, headingPattern: HeadingPattern): ParsedTable | null {
@@ -299,11 +272,6 @@ function emaSeries(values: number[], period: number): Array<number | null> {
   }
 
   return out;
-}
-
-function ema(values: number[], period: number): number | null {
-  const series = emaSeries(values, period);
-  return series.length ? series[series.length - 1] : null;
 }
 
 function computeHighLowSignals(rows: HighLowRow[]): HighLowRow[] {
@@ -478,24 +446,6 @@ interface PriceCacheFile {
   prices: Record<string, LatestCloseInfo>;
 }
 
-async function fetchCloses(symbol: string, interval: "1d" | "1wk", period1: number, period2: number): Promise<number[]> {
-  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?period1=${period1}&period2=${period2}&interval=${interval}&includePrePost=false&events=div%2Csplits`;
-  const res = await requestUrl({
-    url,
-    method: "GET",
-    headers: {
-      "User-Agent": "Mozilla/5.0",
-      "Accept": "application/json",
-    },
-  });
-
-  const payload = res.json;
-  const result = payload?.chart?.result?.[0];
-  const closes = result?.indicators?.quote?.[0]?.close;
-  if (!Array.isArray(closes)) throw new Error(`Yahoo Finance returned no closes for ${symbol} (${interval})`);
-  return closes.filter((value: unknown): value is number => typeof value === "number" && Number.isFinite(value));
-}
-
 async function fetchLatestClose(symbol: string): Promise<LatestCloseInfo> {
   const nowSec = Math.floor(Date.now() / 1000);
   const period1 = nowSec - 20 * 24 * 60 * 60;
@@ -524,32 +474,6 @@ async function fetchLatestClose(symbol: string): Promise<LatestCloseInfo> {
   }
 
   throw new Error(`Yahoo Finance returned no numeric close for ${symbol}`);
-}
-
-async function fetchQqqeSignalsForDate(noteDateIso: string): Promise<QqqeSignals> {
-  const [y, m, d] = noteDateIso.split("-").map(Number);
-  const period2 = Math.floor(Date.UTC(y, m - 1, d, 0, 0, 0) / 1000);
-  const dailyPeriod1 = period2 - 180 * 24 * 60 * 60;
-  const weeklyPeriod1 = period2 - 900 * 24 * 60 * 60;
-
-  const [dailyCloses, weeklyCloses] = await Promise.all([
-    fetchCloses("QQQE", "1d", dailyPeriod1, period2),
-    fetchCloses("QQQE", "1wk", weeklyPeriod1, period2),
-  ]);
-
-  const dailyClose = dailyCloses[dailyCloses.length - 1];
-  const dailyEma5 = ema(dailyCloses, 5);
-  const dailyEma10 = ema(dailyCloses, 10);
-  const dailyEma20 = ema(dailyCloses, 20);
-  const weeklyClose = weeklyCloses[weeklyCloses.length - 1];
-  const weeklyEma10 = ema(weeklyCloses, 10);
-  const weeklyEma20 = ema(weeklyCloses, 20);
-
-  return {
-    qqqe_ema1020: Boolean(dailyEma10 !== null && dailyEma20 !== null && dailyClose > dailyEma10 && dailyClose > dailyEma20 && dailyEma10 > dailyEma20),
-    qqqe_ema5: Boolean(dailyEma5 !== null && dailyClose > dailyEma5),
-    qqqe_wema1020: Boolean(weeklyEma10 !== null && weeklyEma20 !== null && weeklyClose > weeklyEma10 && weeklyClose > weeklyEma20 && weeklyEma10 > weeklyEma20),
-  };
 }
 
 function tradePassesFilters(row: { dateIso: string; account?: string; strategy?: string; dir?: "long" | "short"; symbol?: string; grade?: TradeGrade }, filters: TradeFilters): boolean {
@@ -611,38 +535,6 @@ export class MarketMonitorService {
 
     await this.savePriceCache(cache);
     return result;
-  }
-
-  private async computeTractionSignal(noteDateIso: string): Promise<SignalString> {
-    const cacheManager = (this.plugin as any).cache;
-    const trades: Trade[] = cacheManager?.getTrades?.() ?? [];
-    const openRows: TradeRow[] = cacheManager?.getOpenRows?.() ?? [];
-
-    const baseIds = new Set<string>([
-      ...trades.filter(t => t.entry_date < noteDateIso).map(t => t.trade_id.replace(/#\d+$/, "")),
-      ...openRows.filter(r => r.date < noteDateIso).map(r => r.trade_id),
-    ]);
-
-    const ranked = [...baseIds].map(baseId => {
-      const related = trades.filter(t => t.trade_id.replace(/#\d+$/, "") === baseId && t.entry_date < noteDateIso);
-      const lastExit = related.length ? [...related].sort((a, b) => `${b.exit_date} ${b.exit_time}`.localeCompare(`${a.exit_date} ${a.exit_time}`))[0] : null;
-      const entryDate = related[0]?.entry_date ?? openRows.find(r => r.trade_id === baseId)?.date ?? "";
-      const sortKey = lastExit ? `${lastExit.exit_date} ${lastExit.exit_time}` : `${entryDate} 00:00`;
-      return { baseId, sortKey };
-    }).sort((a, b) => b.sortKey.localeCompare(a.sortKey)).slice(0, 5);
-
-    const relevantOpenRows = openRows.filter(r => ranked.some(x => x.baseId === r.trade_id));
-    const analytics = await this.getOpenPositionAnalytics(trades, relevantOpenRows, 0, {});
-    const openMap = new Map(analytics.positions.map(p => [p.baseId, p]));
-
-    const totalR = ranked.reduce((sum, item) => {
-      const related = trades.filter(t => t.trade_id.replace(/#\d+$/, "") === item.baseId);
-      if (openMap.has(item.baseId)) return sum + (openMap.get(item.baseId)?.totalR ?? 0);
-      const total = related.reduce((acc, t) => acc + t.r_multiple, 0);
-      return sum + total;
-    }, 0);
-
-    return totalR > 0 ? "true" : "false";
   }
 
   async getOpenPositionAnalytics(trades: Trade[], openRows: TradeRow[], currentBalance: number, filters: TradeFilters = {}): Promise<OpenPositionAnalytics> {
@@ -711,34 +603,15 @@ export class MarketMonitorService {
     };
   }
 
-  async syncForCreatedFile(file: TAbstractFile): Promise<void> {
-    if (!(file instanceof TFile)) return;
-    if (!this.isEligibleJournalFile(file)) return;
-
-    try {
-      await this.syncNote(file);
-    } catch (e) {
-      console.error("Trading Journal: market monitor auto-sync failed", e);
+  async updateMarketData(): Promise<MarketMonitorSyncResult> {
+    const result = await this.updateMarketDataTable();
+    if (!result) {
+      return { updatedMarketData: false, skipped: `Could not read ${MARKET_DATA_FILE}.` };
     }
-  }
-
-  async syncActiveOrTodayNote(): Promise<MarketMonitorSyncResult> {
-    const active = this.plugin.app.workspace.getActiveFile();
-    if (active instanceof TFile && this.isEligibleJournalFile(active)) {
-      return this.syncNote(active);
-    }
-
-    const today = todayIso();
-    const fallback = this.plugin.app.vault.getFiles().find(file => {
-      const dateIso = extractJournalDate(file);
-      return this.isEligibleJournalFile(file) && dateIso === today;
-    });
-
-    if (!fallback) {
-      return { updatedMarketData: await this.updateMarketDataOnly(), updatedFrontmatter: false, skipped: "No active or today's weekday daily note found." };
-    }
-
-    return this.syncNote(fallback);
+    return {
+      updatedMarketData: result.updated,
+      skipped: result.updated ? undefined : "No market monitor updates were applied.",
+    };
   }
 
   async getDashboardData(): Promise<MarketMonitorDashboardData | null> {
@@ -752,62 +625,6 @@ export class MarketMonitorService {
     };
   }
 
-  private isEligibleJournalFile(file: TFile): boolean {
-    if (file.extension !== "md" || !file.path.startsWith(JOURNAL_FOLDER)) return false;
-    const dateIso = extractJournalDate(file);
-    if (!dateIso) return false;
-    if (dateIso < todayIso()) return false;
-    return isWeekday(dateIso);
-  }
-
-  private async syncNote(file: TFile): Promise<MarketMonitorSyncResult> {
-    const noteDate = extractJournalDate(file);
-    if (!noteDate) return { updatedMarketData: false, updatedFrontmatter: false, skipped: "Daily note date not found in filename." };
-    if (noteDate < todayIso()) return { updatedMarketData: false, updatedFrontmatter: false, skipped: "Only today's and future notes are updated." };
-    if (!isWeekday(noteDate)) return { updatedMarketData: false, updatedFrontmatter: false, skipped: "Weekend note skipped." };
-
-    const marketData = await this.updateMarketDataTable();
-    if (!marketData) return { updatedMarketData: false, updatedFrontmatter: false, skipped: `Could not read ${MARKET_DATA_FILE}.` };
-
-    const previousMonitorRow = marketData.monitorRows.find(row => row.dateIso < noteDate);
-    if (!previousMonitorRow) {
-      return { updatedMarketData: marketData.updated, updatedFrontmatter: false, skipped: `No market monitor row found before ${noteDate}.` };
-    }
-
-    const previousHighLowRow = marketData.highLowRows.find(row => row.dateIso < noteDate);
-
-    let qqqeSignals: Partial<QqqeSignals> = {};
-    try {
-      qqqeSignals = await fetchQqqeSignalsForDate(noteDate);
-    } catch (e) {
-      console.error("Trading Journal: failed to fetch QQQE signals", e);
-    }
-
-    let traction: SignalString = "false";
-    try {
-      traction = await this.computeTractionSignal(noteDate);
-    } catch (e) {
-      console.error("Trading Journal: failed to compute traction", e);
-    }
-
-    await this.plugin.app.fileManager.processFrontMatter(file, frontmatter => {
-      frontmatter["4up_down"] = previousMonitorRow.up4 > previousMonitorRow.down4 ? "true" : "false";
-      frontmatter["5d_ratio"] = previousMonitorRow.ratio5 !== null && previousMonitorRow.ratio5 >= 1 ? "true" : "false";
-      frontmatter["high_lows"] = previousHighLowRow?.signal ?? "false";
-      frontmatter["traction"] = traction;
-
-      if (qqqeSignals.qqqe_ema1020 !== undefined) frontmatter["qqqe_ema1020"] = qqqeSignals.qqqe_ema1020 ? "true" : "false";
-      if (qqqeSignals.qqqe_ema5 !== undefined) frontmatter["qqqe_ema5"] = qqqeSignals.qqqe_ema5 ? "true" : "false";
-      if (qqqeSignals.qqqe_wema1020 !== undefined) frontmatter["qqqe_wema1020"] = qqqeSignals.qqqe_wema1020 ? "true" : "false";
-    });
-
-    return { updatedMarketData: marketData.updated, updatedFrontmatter: true };
-  }
-
-  private async updateMarketDataOnly(): Promise<boolean> {
-    const result = await this.updateMarketDataTable();
-    return result?.updated ?? false;
-  }
 
   private async readMarketDataDocument(): Promise<MarketDataDocument | null> {
     const file = this.plugin.app.vault.getAbstractFileByPath(MARKET_DATA_FILE);
